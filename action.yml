@@ -1,0 +1,200 @@
+name: Digest cooldown
+description: >-
+  Gate external docker image digest bumps behind a cooldown period via a commit
+  status, working around Renovate's missing docker digest releaseTimestamp
+  (renovatebot/renovate#38656). Opt in to gate-version-bumps to cool every
+  newly-introduced digest (version bumps and fresh pins), scoped by author.
+
+inputs:
+  cooldown-days:
+    description: Days an external image digest must age before the status passes
+    required: false
+    default: '3'
+  skip-registries:
+    description: >-
+      Comma-separated registry/name prefixes treated as trusted (not gated).
+      Matched on *path-segment boundaries*, so `ghcr.io/acme` covers
+      `ghcr.io/acme/app` (with or without a tag) but never
+      `ghcr.io/acme-evil/pwned` -- a bare prefix match would let anyone
+      smuggle a look-alike org past the cooldown gate. `docker.io/` and its
+      aliases are normalised away on *both* sides, so `foo/bar` matches
+      `docker.io/foo/bar` and `docker.io/foo` matches `foo/bar`. A ref
+      prefixed by a `${...}` expansion (e.g. `${MIRROR}ghcr.io/acme/x`)
+      keeps the expansion in its name and therefore never matches a prefix --
+      what actually gets pulled lives on the expanded registry, so it stays
+      gated (fail-closed). verify-image-provenance imports the very same
+      matcher, so its same-named input has identical semantics. Defaults to
+      empty: nothing is trusted unless the caller says so.
+    required: false
+    default: ''
+  pr-number:
+    description: >-
+      Target PR number. Defaults to the PR that triggered the run; empty on
+      schedule/workflow_dispatch, in which case all open PRs are scanned.
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  base-branches:
+    description: >-
+      Comma-separated base branches whose PRs are gated. Renovate opens its
+      PRs against the base branch(es); promotion PRs (e.g. develop -> release)
+      carry digests that already cleared cooldown on the base, so re-gating
+      them only blocks the promotion. Defaults to the repository's default
+      branch when unset.
+    required: false
+    default: ''
+  dry-run:
+    description: Evaluate only; do not post commit status or PR comment
+    required: false
+    default: 'false'
+  always-report:
+    description: >-
+      Post a success `digest-cooldown` status even on PRs with no external
+      image digest bump. Enable this when the status is wired as a
+      branch-protection required check: an unreported required context blocks
+      merges forever ("Waiting for status to be reported"). When false (the
+      default) the status is posted only on PRs that carry a gated digest,
+      which suffices for the Renovate-automerge gate (platformAutomerge=false
+      honours non-required statuses).
+    required: false
+    default: 'false'
+  gate-version-bumps:
+    description: >-
+      Gate every *newly-introduced* external docker digest, not just pure digest
+      bumps (same tag, digest changed). When true the action gates any digest
+      that appears on the head side of the PR diff but nowhere in the base --
+      covering version bumps (tag + digest move together), fresh pins and initial
+      pins alike. Off by default for backward compatibility: the default (false)
+      gates only pure digest bumps, leaving version bumps to Renovate's native
+      minimumReleaseAge. That native gate fails open on registries with no tag
+      releaseTimestamp (private registries / ECR / images without an OCI
+      `created` annotation), so enable this to make the action the single source
+      of docker cooldown and pair it with disabling native age-gating for the
+      docker datasource in Renovate (matchDatasources: ["docker"],
+      minimumReleaseAge: "0"). The judgement is tag-agnostic set membership, so
+      it cannot be fooled by line multiplicity, cross-file splits or
+      diff-boundary spoofing. Scope which PRs it applies to with gate-authors.
+    required: false
+    default: 'false'
+  gate-authors:
+    description: >-
+      Comma-separated PR author logins that get the broad digest-centric gate
+      when gate-version-bumps is true. Defaults to `renovate[bot]` so only
+      Renovate's docker updates are cooled for every new digest (the automerge
+      threat model), avoiding a spurious cooldown on humans' fresh-pin PRs. This
+      scopes only *which strategy* applies, never whether a PR is gated: an
+      out-of-scope author still gets the default pure-digest-bump gate, so every
+      author keeps at least the historical baseline and a mis-scoped list can
+      never make the gate fail open (opt-in never gates less than default). Set
+      to empty to apply the digest-centric gate to all authors. Has no effect
+      when gate-version-bumps is false. NOTE: a self-hosted Renovate running as
+      your own GitHub App does not author PRs as `renovate[bot]` -- it uses the
+      App's own login (e.g. `my-bot[bot]`). Leaving the default in that setup
+      silently degrades every PR to the pure-digest-bump baseline, so set this
+      to the login the API actually reports.
+    required: false
+    default: renovate[bot]
+  trusted-comment-author:
+    description: >-
+      Login whose PR comment is trusted as the digest-cooldown state store.
+      Only a comment authored by this login is read for the recorded first-seen
+      dates, so an attacker cannot forge an "already aged" state by posting a
+      back-dated state comment before the bot. Defaults to `github-actions[bot]`,
+      which is the author when the default GITHUB_TOKEN posts. If you pass a
+      custom token (a PAT or your own GitHub App) via github-token, set this to
+      that identity's bot login -- otherwise the action cannot find its own
+      state comment and the gate breaks.
+    required: false
+    default: github-actions[bot]
+  bypass-label:
+    description: >-
+      Single PR label name that forces the `digest-cooldown` status to success
+      even while digests are still cooling -- an emergency escape hatch for
+      urgent merges. When a PR carries this label the status is forced to
+      success; the comparison is case-insensitive. Exactly one label designates
+      the bypass so a label search finds every bypassed PR. State recording
+      continues unchanged (first-seen dates are never reset), so removing the
+      label resumes the cooldown from the original first-observation date. This
+      is not a security boundary but an explicit, auditable override by whoever
+      holds triage rights to label the PR (each bypass is logged as a notice).
+      The gating workflow must also trigger on the `labeled` and `unlabeled`
+      pull_request activity types so the status is re-evaluated when the label
+      is added or removed. Empty (the default) disables the feature.
+    required: false
+    default: ''
+  bypass-requires-status:
+    description: >-
+      bypass-label を有効化する前提となる commit status の context 名。指定した
+      context の commit status が PR head SHA で success のときだけ bypass-label が
+      効く（前提条件付きバイパス）。主用途は verify-image-provenance が「その image は
+      署名・出自検証を通った」と報告している PR に限って緊急バイパスを許すこと
+      （その場合ここに指定するのは同アクションの context 名 provenance-verify）。
+      既定の空文字は前提なし＝従来どおり label だけでバイパスが効く（後方互換）。
+      status を投稿する step（verify-image-provenance 等）は、**同一 job 内で本
+      アクションより先**に配置すること（後段に置くと本アクションの実行時点では
+      status が未投稿で、バイパスが常に効かない）。前提を success と確認できない
+      場合はすべて fail-closed でバイパス不適用: context が未投稿（missing）、
+      success 以外（failure / pending / error）、commit status の照会自体が失敗
+      （rate limit / 5xx など。unreadable。この場合も digest-cooldown status の投稿
+      自体は必ず行うので required check が deadlock しない）、本アクション
+      自身の context（digest-cooldown）を指定した自己参照（deadlock になる設定ミス
+      なので warning を出して無効）、および status の投稿者が
+      bypass-requires-status-creators に含まれない（untrusted-creator）。注意:
+      status を出さないイメージ（署名ポリシー未登録など）は label を貼っても
+      バイパスできなくなる。
+    required: false
+    default: ''
+  bypass-requires-status-creators:
+    description: >-
+      bypass-requires-status で指定した commit status を投稿した主体（Statuses API の
+      `creator.login`）の allowlist（カンマ区切り）。ここに含まれない主体が投稿した
+      status は `untrusted-creator` として扱い、success でもバイパスを許しません
+      （fail-closed）。既定は `github-actions[bot]` で、これは既定の `GITHUB_TOKEN` で
+      status を投稿したときの主体です。trusted-comment-author が state コメントの
+      作成者を絞っているのと**対称**の防御で、カスタム token（PAT / 独自 App）で
+      status を投稿している場合はその identity の login を設定してください。空文字に
+      すると creator を検証しません（context と state だけで判定する従来挙動）。
+      比較は case-insensitive。⚠️ この機構の防御上限: `statuses: write` を持つ者は
+      前提 status 自体を自作できるため、これは triage 権限者に対する防御であって
+      write 権限保有者に対する防御ではありません。
+    required: false
+    default: github-actions[bot]
+  github-token:
+    description: Token used for API calls (needs statuses:write, pull-requests:write)
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Post digest cooldown status
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        COOLDOWN_DAYS: ${{ inputs.cooldown-days }}
+        SKIP_REGISTRIES: ${{ inputs.skip-registries }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        BASE_BRANCHES: ${{ inputs.base-branches }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        ALWAYS_REPORT: ${{ inputs.always-report }}
+        GATE_VERSION_BUMPS: ${{ inputs.gate-version-bumps }}
+        GATE_AUTHORS: ${{ inputs.gate-authors }}
+        TRUSTED_COMMENT_AUTHOR: ${{ inputs.trusted-comment-author }}
+        BYPASS_LABEL: ${{ inputs.bypass-label }}
+        BYPASS_REQUIRES_STATUS: ${{ inputs.bypass-requires-status }}
+        BYPASS_REQUIRES_STATUS_CREATORS: ${{ inputs.bypass-requires-status-creators }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        # extractScript-anchor: digest-cooldown-bridge
+        script: |
+          // Docker image cooldown gate. The implementation lives in impl.mjs
+          // (ESM, zero deps) so it can be unit-tested directly; see that
+          // file's header for the full design and the two gating modes.
+          //
+          // A composite action is auto-materialised at GITHUB_ACTION_PATH with
+          // no checkout, and github-script's `require` passes an absolute path
+          // straight through to the native require (actions/github-script
+          // src/wrap-require.ts). github-script v9 runs on node24, whose
+          // require() loads a top-level-await-free ESM module directly, so this
+          // pulls impl.mjs from the action's own checkout at the exact ref the
+          // caller pinned -- no checkout, no network, no dependency.
+          const impl = require(`${process.env.GITHUB_ACTION_PATH}/impl.mjs`);
+          await impl.run({ github, context, core });

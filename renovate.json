@@ -2,13 +2,14 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
-    "helpers:pinGitHubActionDigests"
+    "helpers:pinGitHubActionDigests",
+    "github>aquaproj/aqua-renovate-config#2.13.0"
   ],
   "minimumReleaseAge": "3 days",
   "platformAutomerge": false,
   "customManagers": [
     {
-      "description": "Tool versions pinned as a workflow env var or action input. actionlint and zizmor install an exact version instead of the release page's `latest`, so the pin has to be something Renovate can see. extractVersionTemplate drops the tag's leading v to match how the version is written in the file.",
+      "description": "zizmor's version input, pinned so the action resolves a digest-pinned container instead of `latest`. Every other CLI in the workflows comes from aqua.yaml now, which the aqua preset handles. extractVersionTemplate drops the tag's leading v to match how the version is written in the file.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
       "matchStrings": [

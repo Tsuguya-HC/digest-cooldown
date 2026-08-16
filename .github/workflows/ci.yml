@@ -24,8 +24,7 @@ jobs:
         run: node tests/test.mjs
 
   # Checks the workflow expressions and job graph, and shells out to shellcheck
-  # for every `run:` block. Pinned and checksummed rather than pulled from the
-  # release page's `latest`.
+  # for every `run:` block.
   actionlint:
     runs-on: ubuntu-latest
     permissions:
@@ -35,21 +34,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install actionlint
-        env:
-          # renovate: datasource=github-releases depName=rhysd/actionlint
-          ACTIONLINT_VERSION: "1.7.12"
-        run: |
-          set -euo pipefail
-          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
-          # `sha256sum -c` resolves the file name from the checksum line, so the
-          # tarball has to stay under the name the release published it as.
-          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL "$base/${tarball}" -o "${tarball}"
-          curl -fsSL "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o checksums.txt
-          grep " ${tarball}\$" checksums.txt | sha256sum -c -
-          sudo tar xzf "${tarball}" -C /usr/local/bin actionlint
-          actionlint --version
+      - uses: aquaproj/aqua-installer@96a9bc20066c5bf5e275b41019cfc165b25f4e2e # v4.0.5
+        with:
+          aqua_version: v2.62.3
 
       - name: Lint workflows
         run: |

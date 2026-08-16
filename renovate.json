@@ -8,11 +8,6 @@
   "platformAutomerge": false,
   "packageRules": [
     {
-      "description": "A digest carries no publish timestamp, so minimumReleaseAge can never be satisfied and renovate/stability-days stays pending forever (renovate#38656). The soak is enforced by the digest-cooldown workflow instead, on our own clock.",
-      "matchUpdateTypes": ["digest", "pinDigest"],
-      "minimumReleaseAge": "0"
-    },
-    {
       "description": "Automerge GitHub Actions patch/digest (low risk)",
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["patch", "digest"],

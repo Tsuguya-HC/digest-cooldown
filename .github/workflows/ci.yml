@@ -42,10 +42,13 @@ jobs:
         run: |
           set -euo pipefail
           base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
-          curl -fsSL "$base/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o actionlint.tar.gz
+          # `sha256sum -c` resolves the file name from the checksum line, so the
+          # tarball has to stay under the name the release published it as.
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$base/${tarball}" -o "${tarball}"
           curl -fsSL "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o checksums.txt
-          grep " actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz\$" checksums.txt | sha256sum -c -
-          sudo tar xzf actionlint.tar.gz -C /usr/local/bin actionlint
+          grep " ${tarball}\$" checksums.txt | sha256sum -c -
+          sudo tar xzf "${tarball}" -C /usr/local/bin actionlint
           actionlint --version
 
       - name: Lint workflows

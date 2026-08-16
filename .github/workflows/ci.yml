@@ -15,16 +15,75 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
       - name: Run tests
         run: node tests/test.mjs
 
+  # Checks the workflow expressions and job graph, and shells out to shellcheck
+  # for every `run:` block. Pinned and checksummed rather than pulled from the
+  # release page's `latest`.
+  actionlint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        env:
+          # renovate: datasource=github-releases depName=rhysd/actionlint
+          ACTIONLINT_VERSION: "1.7.12"
+        run: |
+          set -euo pipefail
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          # `sha256sum -c` resolves the file name from the checksum line, so the
+          # tarball has to stay under the name the release published it as.
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$base/${tarball}" -o "${tarball}"
+          curl -fsSL "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o checksums.txt
+          grep " ${tarball}\$" checksums.txt | sha256sum -c -
+          sudo tar xzf "${tarball}" -C /usr/local/bin actionlint
+          actionlint --version
+
+      - name: Lint workflows
+        run: |
+          set -euo pipefail
+          # actionlint silently skips its shell checks when shellcheck is
+          # absent, which would quietly reduce this job to expression linting
+          # if the runner image ever drops it.
+          command -v shellcheck >/dev/null || {
+            echo "::error::shellcheck is not on the runner; actionlint would skip every run: block"
+            exit 1
+          }
+          actionlint -no-color
+
+  # Static audit of the workflows themselves: template injection, credential
+  # persistence, permission scope, spoofable bot conditions. This repo ships an
+  # action other repos consume, so its own workflows are worth auditing.
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload SARIF to code scanning (free on public repos)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          # renovate: datasource=github-releases depName=zizmorcore/zizmor
+          version: "1.29.0"
+
   # The only required status check; see the repo ruleset.
   gate:
     name: CI Gate
-    needs: [test]
+    needs: [test, actionlint, zizmor]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}

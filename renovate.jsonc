@@ -4,8 +4,12 @@
   // The aqua preset is pinned rather than floating: it owns which files the aqua
   // manager reads, and a preset-side change would silently re-scope this repo.
   "extends": [
-    "config:recommended",
-    "helpers:pinGitHubActionDigests",
+    // config:best-practices = config:recommended + docker:pinDigests
+    // + helpers:pinGitHubActionDigests + :configMigration + :pinDevDependencies
+    // + abandonments:recommended + security:minimumReleaseAgeNpm
+    // + :maintainLockFilesWeekly. The two presets listed separately before are
+    // both inside it now.
+    "config:best-practices",
     "github>aquaproj/aqua-renovate-config#2.13.0"
   ],
 

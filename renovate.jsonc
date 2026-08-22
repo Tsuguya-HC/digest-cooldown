@@ -34,6 +34,27 @@
 
   "packageRules": [
     {
+      "description": [
+        "First-party code does not soak. minimumReleaseAge buys time for someone",
+        "else to notice a poisoned release before we take it; there is no someone",
+        "else here — we wrote it, reviewed it and merged it. Waiting three days on",
+        "our own reusable workflow only delays fixes to the thing that gates every",
+        "other check."
+      ],
+      "matchPackageNames": ["Tsuguya/**"],
+      "minimumReleaseAge": "0"
+    },
+    {
+      "description": [
+        "A digest has no release date attached (renovate#38656), so the age gate",
+        "cannot be evaluated and renovate/stability-days is set but never clears.",
+        "horenso#22 — a plain node:22-alpine digest pin — sat pending on exactly",
+        "this for 84 days. digest-cooldown gates these on its own clock instead."
+      ],
+      "matchUpdateTypes": ["digest", "pinDigest"],
+      "minimumReleaseAge": "0"
+    },
+    {
       // This repo is the cooldown gate the other repos depend on, but its own
       // action bumps are ordinary CI updates — the gate does not gate itself.
       "description": "Automerge GitHub Actions patch/digest (low risk)",

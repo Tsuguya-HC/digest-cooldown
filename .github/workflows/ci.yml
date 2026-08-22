@@ -73,7 +73,7 @@ jobs:
   # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
   # `ignoredAuthors` の綴り違いを 5 週間放置していた。
   lint-renovate:
-    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@2e7f65a9ac3492f91652e2cbd4e267202b5dabfd # v0
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@876259d7c298c76ff25ee2b5ee2ac4de89b28f52 # v1.0.0
     permissions:
       contents: read
 

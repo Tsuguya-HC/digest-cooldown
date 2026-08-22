@@ -8,8 +8,13 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -22,52 +27,17 @@ jobs:
           node-version: "24"
       - name: Run tests
         run: node tests/test.mjs
+  # The only required status check; see the repo ruleset.
 
-  # Checks the workflow expressions and job graph, and shells out to shellcheck
-  # for every `run:` block.
-  actionlint:
-    runs-on: ubuntu-latest
+  # ワークフロー自身の検査。以前はこのリポジトリが actionlint と zizmor を
+  # 自前のジョブで回していたが、同じものが 6 リポに散って drift していたため
+  # home-actions に寄せた。ツールのピンは向こう側にあり、ここは呼び先の SHA を
+  # 追うだけ。aqua.yaml も要らなくなった（共有ワークフローが AQUA_CONFIG で
+  # 自分の _tooling/aqua.yaml を使うため）。
+  lint-workflows:
+    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: aquaproj/aqua-installer@96a9bc20066c5bf5e275b41019cfc165b25f4e2e # v4.0.5
-        with:
-          aqua_version: v2.62.3
-
-      - name: Lint workflows
-        run: |
-          set -euo pipefail
-          # actionlint silently skips its shell checks when shellcheck is
-          # absent, which would quietly reduce this job to expression linting
-          # if the runner image ever drops it.
-          command -v shellcheck >/dev/null || {
-            echo "::error::shellcheck is not on the runner; actionlint would skip every run: block"
-            exit 1
-          }
-          actionlint -no-color
-
-  # Static audit of the workflows themselves: template injection, credential
-  # persistence, permission scope, spoofable bot conditions. This repo ships an
-  # action other repos consume, so its own workflows are worth auditing.
-  zizmor:
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write # upload SARIF to code scanning (free on public repos)
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
-        with:
-          # renovate: datasource=github-releases depName=zizmorcore/zizmor
-          version: "1.29.0"
-
-  # The only required status check; see the repo ruleset.
 
   # Renovate 設定の検証。Renovate は知らないキーを黙って捨てるので（PR も警告も
   # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
@@ -76,20 +46,13 @@ jobs:
     uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
-
-  # aqua-checksums.json が aqua.yaml と一致しているかの検査。`aqua i` だけでは
-  # registry ref のズレを取りこぼす（aqua が自分で追記して exit 0 になる）ので、
-  # 実インストール後の git 差分で見る。直すのはクラスタ側の aqua-checksum
-  # ワークフローで、こちらはそれが直せていないことを赤にする側。
-  lint-aqua:
-    uses: Tsuguya/home-actions/.github/workflows/lint-aqua.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
-    permissions:
-      contents: read
-
   gate:
     name: CI Gate
-    needs: [test, actionlint, zizmor, lint-renovate, lint-aqua]
-    if: ${{ always() }}
+    needs: [test, lint-workflows, lint-renovate]
+    # `always()` ではなく `!cancelled()`。always() だと run をキャンセルしたとき
+    # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
+    # 失敗として記録される。キャンセルされた run に下すべき判定は無い。
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -1,16 +1,13 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
 
-  // The aqua preset is pinned rather than floating: it owns which files the aqua
-  // manager reads, and a preset-side change would silently re-scope this repo.
   "extends": [
     // config:best-practices = config:recommended + docker:pinDigests
     // + helpers:pinGitHubActionDigests + :configMigration + :pinDevDependencies
     // + abandonments:recommended + security:minimumReleaseAgeNpm
     // + :maintainLockFilesWeekly. The two presets listed separately before are
     // both inside it now.
-    "config:best-practices",
-    "github>aquaproj/aqua-renovate-config#2.13.0"
+    "config:best-practices"
   ],
 
   "minimumReleaseAge": "3 days",
@@ -18,23 +15,6 @@
   // Merge directly rather than queueing on GitHub: this repo has no required checks
   // that platform automerge would wait on, and queueing just delays the merge.
   "platformAutomerge": false,
-
-  "customManagers": [
-    {
-      "description": [
-        "zizmor's version input, pinned so the action resolves a digest-pinned",
-        "container instead of `latest`. Every other CLI in the workflows comes from",
-        "aqua.yaml now, which the aqua preset handles. extractVersionTemplate drops",
-        "the tag's leading v to match how the version is written in the file."
-      ],
-      "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
-      "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s*\\n\\s*[\\w-]+: \"(?<currentValue>[^\"]+)\""
-      ],
-      "extractVersionTemplate": "^v(?<version>.+)$"
-    }
-  ],
 
   "packageRules": [
     {

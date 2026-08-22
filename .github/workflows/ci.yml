@@ -68,9 +68,18 @@ jobs:
           version: "1.29.0"
 
   # The only required status check; see the repo ruleset.
+
+  # Renovate 設定の検証。Renovate は知らないキーを黙って捨てるので（PR も警告も
+  # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
+  # `ignoredAuthors` の綴り違いを 5 週間放置していた。
+  lint-renovate:
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@2e7f65a9ac3492f91652e2cbd4e267202b5dabfd # v0
+    permissions:
+      contents: read
+
   gate:
     name: CI Gate
-    needs: [test, actionlint, zizmor]
+    needs: [test, actionlint, zizmor, lint-renovate]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}

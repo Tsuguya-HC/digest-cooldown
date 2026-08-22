@@ -73,13 +73,22 @@ jobs:
   # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
   # `ignoredAuthors` の綴り違いを 5 週間放置していた。
   lint-renovate:
-    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@876259d7c298c76ff25ee2b5ee2ac4de89b28f52 # v1.0.0
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
+    permissions:
+      contents: read
+
+  # aqua-checksums.json が aqua.yaml と一致しているかの検査。`aqua i` だけでは
+  # registry ref のズレを取りこぼす（aqua が自分で追記して exit 0 になる）ので、
+  # 実インストール後の git 差分で見る。直すのはクラスタ側の aqua-checksum
+  # ワークフローで、こちらはそれが直せていないことを赤にする側。
+  lint-aqua:
+    uses: Tsuguya/home-actions/.github/workflows/lint-aqua.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
 
   gate:
     name: CI Gate
-    needs: [test, actionlint, zizmor, lint-renovate]
+    needs: [test, actionlint, zizmor, lint-renovate, lint-aqua]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}

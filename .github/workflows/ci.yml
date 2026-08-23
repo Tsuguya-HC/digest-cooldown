@@ -1,33 +1,87 @@
 name: CI
 
+# 必須ステータスチェックを単一 gate に集約するオーケストレーター。
+# 各検査は workflow_call の leaf にあり、ここはそれを組み立てるだけ。
+# ruleset に登録する必須チェックは末尾の `CI Gate` 1 個。
+#
+# トリガーに paths フィルタは付けない。leaf をトリガー側で絞ると、該当しない
+# PR ではチェックが報告されず、必須化された context が
+# "Expected — Waiting for status to be reported" のまま永久にブロックする。
+#
+# 代わりに起動は常にして、`detect` が leaf ごとの実行要否を出す。skip した
+# leaf は gate から見て `skipped` = 合格扱いになるので、報告は常に発生する。
+#
+# push トリガーは持たない。main は ruleset で直 push を禁じており PR 経由で
+# しか更新されない（= マージ時点で CI Gate 通過済み）ため push CI は冗長。
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    # `edited` on top of the default opened/synchronize/reopened. Changing a
+    # PR's base is an `edited` activity, so a PR opened against another branch
+    # and later retargeted at main never matched `branches:` and never produced
+    # a CI Gate check at all — the required context stays "Expected — Waiting
+    # for status to be reported" and the PR cannot merge until someone pushes
+    # to it.
+    #
+    # detect を入れたことで塞ぐものが 1 つ増えた。retarget では head SHA が
+    # 変わらないので、`edited` が無いと旧 base で計算した detect の結果
+    # （= leaf を skip した緑）がそのまま新 base の必須チェックに流用できる。
+    types: [opened, synchronize, reopened, edited]
 
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.number }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    name: test
-    runs-on: ubuntu-latest
+  # 変更ファイル種別を判定し、各 leaf を実行すべきかを outputs で返す。
+  # merge-base 等のエッジケースを正しく扱うため dorny/paths-filter を使う。
+  #
+  # leaf 自身のワークフローファイルも各フィルタに入れてある（自己参照）。leaf の
+  # 中身を変えた PR がその leaf を走らせないのでは検証にならない。
+  detect:
+    name: detect changes
+    # checkout と paths-filter しか動かないので slim で足りる。ツールを要求する
+    # のは leaf 側で、そちらは ubuntu-latest のまま。
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read # dorny/paths-filter が PR の変更ファイル一覧を API 取得するために必要
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      renovate: ${{ steps.filter.outputs.renovate }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
         with:
-          node-version: "24"
-      - name: Run tests
-        run: node tests/test.mjs
-  # The only required status check; see the repo ruleset.
+          filters: |
+            # action.yml は github-script ブリッジそのもので、テストはそれを
+            # 抽出して回す。実装とテストのどちらが動いても走らせる。
+            code:
+              - 'action.yml'
+              - 'impl.mjs'
+              - 'tests/**'
+              - 'package.json'
+              - '.github/workflows/_test.yml'
+            workflows:
+              - '.github/workflows/**'
+              - '.github/zizmor.yml'
+            renovate:
+              - 'renovate.json*'
+
+  test:
+    needs: detect
+    if: ${{ needs.detect.outputs.code == 'true' }}
+    uses: ./.github/workflows/_test.yml
+    permissions:
+      contents: read
 
   # ワークフロー自身の検査。以前はこのリポジトリが actionlint と zizmor を
   # 自前のジョブで回していたが、同じものが 6 リポに散って drift していたため
@@ -35,6 +89,8 @@ jobs:
   # 追うだけ。aqua.yaml も要らなくなった（共有ワークフローが AQUA_CONFIG で
   # 自分の _tooling/aqua.yaml を使うため）。
   lint-workflows:
+    needs: detect
+    if: ${{ needs.detect.outputs.workflows == 'true' }}
     uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
@@ -43,17 +99,27 @@ jobs:
   # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
   # `ignoredAuthors` の綴り違いを 5 週間放置していた。
   lint-renovate:
+    needs: detect
+    if: ${{ needs.detect.outputs.renovate == 'true' }}
     uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
     permissions:
       contents: read
+
+  # The only required status check; see the repo ruleset.
+  #
+  # `detect` も needs に含める。detect が失敗すると全 leaf の `if` が偽になって
+  # skip され、skip は合格扱いなので、detect を見ていないと「何も検査していない
+  # 緑」が必須チェックを満たしてしまう。
   gate:
     name: CI Gate
-    needs: [test, lint-workflows, lint-renovate]
+    needs: [detect, test, lint-workflows, lint-renovate]
     # `always()` ではなく `!cancelled()`。always() だと run をキャンセルしたとき
     # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
     # 失敗として記録される。キャンセルされた run に下すべき判定は無い。
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # 集計は bash の for ループだけなので slim で足りる。
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions: {}
     steps:
       - name: Aggregate results
@@ -72,3 +138,4 @@ jobs:
               *) echo "::error::A required job concluded with: ${r}"; exit 1 ;;
             esac
           done
+          echo "All required jobs passed or were correctly skipped."

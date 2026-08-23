@@ -1,0 +1,30 @@
+name: test
+
+# action の単体テスト leaf。依存もネットワークも要らない
+# （action.yml の github-script ブリッジを抽出して impl.mjs を実際の
+# require 経路で回す）。
+#
+# オーケストレーターは ci.yml で、必須チェックはそこの `CI Gate` 1 個だけ。
+# 直接のトリガーは持たない — leaf 自身が pull_request で起動すると、同じ
+# コミットに対して gate 経由の結果と重複した check run が並ぶ。
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Run tests
+        run: node tests/test.mjs

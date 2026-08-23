@@ -42,7 +42,9 @@ jobs:
   # 中身を変えた PR がその leaf を走らせないのでは検証にならない。
   detect:
     name: detect changes
-    runs-on: ubuntu-latest
+    # checkout と paths-filter しか動かないので slim で足りる。ツールを要求する
+    # のは leaf 側で、そちらは ubuntu-latest のまま。
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       contents: read
@@ -115,7 +117,8 @@ jobs:
     # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
     # 失敗として記録される。キャンセルされた run に下すべき判定は無い。
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # 集計は bash の for ループだけなので slim で足りる。
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: {}
     steps:

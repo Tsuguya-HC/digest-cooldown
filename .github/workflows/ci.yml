@@ -27,11 +27,16 @@ on:
     # 変わらないので、`edited` が無いと旧 base で計算した detect の結果
     # （= leaf を skip した緑）がそのまま新 base の必須チェックに流用できる。
     types: [opened, synchronize, reopened, edited]
+  # マージキューは main に対する一時 commit（gh-readonly-queue/main/pr-N-<sha>）
+  # の上で必須チェックを取り直す。ここで報告しないとキューの entry は永久に待つ。
+  # detect の dorny/paths-filter は merge_group を base_sha..head_sha で解釈する。
+  merge_group:
 
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.number }}
+  # merge_group には event.number が無いので ref（キューの一時ブランチ）で分ける。
+  group: ${{ github.workflow }}-${{ github.event.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

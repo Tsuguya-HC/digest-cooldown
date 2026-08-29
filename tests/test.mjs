@@ -94,7 +94,7 @@ function actionInputDefault(name) {
 // TOCTOU ガード（diff 取得後に head を引き直して不一致なら skip）の検証用で、
 // 1 回目 = PR 列挙、2 回目 = 引き直し。配列を尽きたら最後の値を返し続ける。
 // 未指定なら従来どおり常に SHA（head が動かない通常ケース）。
-async function run({ diff, today, comment = null, env = {}, base = 'main', defaultBranch = 'main', openPrs = null, author = 'renovate[bot]', failCommentOps = false, labels = [], commitStatuses = [], failStatusList = false, malformedStatusList = false, headShaSequence = null }) {
+async function run({ diff, today, comment = null, env = {}, base = 'main', defaultBranch = 'main', openPrs = null, author = 'renovate[bot]', failCommentOps = false, labels = [], commitStatuses = [], failStatusList = false, malformedStatusList = false, headShaSequence = null, contextExtra = {}, failPullGet = false }) {
   const calls = { statuses: [], created: [], updated: [], warnings: [], infos: [], notices: [], statusListCalls: [] };
   let headShaCall = 0;
   const nextHeadSha = () => {
@@ -107,6 +107,7 @@ async function run({ diff, today, comment = null, env = {}, base = 'main', defau
     rest: {
       pulls: {
         get: async (params) => {
+          if (failPullGet) { throw new Error('pulls API down'); }
           if (params.mediaType && params.mediaType.format === 'diff') {
             return { data: diff };
           }
@@ -148,7 +149,8 @@ async function run({ diff, today, comment = null, env = {}, base = 'main', defau
       },
     },
   };
-  const context = { repo: { owner: 'animalife', repo: 'demo' } };
+  // contextExtra: eventName / payload / sha を足して merge_group 等のイベントを再現する。
+  const context = { repo: { owner: 'animalife', repo: 'demo' }, ...contextExtra };
   // core.info/warning をキャプチャして返り値 calls に含める。既存テストは
   // calls.statuses 等のみ参照するため、warnings/infos 配列を「追加」する形で
   // 後方互換（観測性テスト #2/#7 でアサートする）。
@@ -177,6 +179,8 @@ async function run({ diff, today, comment = null, env = {}, base = 'main', defau
   // 応答形状」という出荷構成が一度もテストされず、既定で機能が死んでいる欠陥を通した。
   process.env.BYPASS_REQUIRES_STATUS_CREATORS =
     actionInputDefault('bypass-requires-status-creators');
+  process.env.MERGE_GROUP_STATUS_CREATORS =
+    actionInputDefault('merge-group-status-creators');
   // NOW (home fork) is reset every run: leaving a previous test's instant in the
   // environment would silently pin the clock for every later case.
   process.env.NOW = '';
@@ -2210,6 +2214,76 @@ const main = async () => {
     threw = false;
     try { assertKnownDigestAlgos(`x@${'z'.repeat(4096)}`); } catch { threw = true; }
     check('unit/assertKnownDigestAlgos: a long non-digest line is scanned without throwing', threw === false);
+  }
+
+  // --- merge_group: PR head の判定をマージキューの一時 commit に転記する ---
+  {
+    const MG_SHA = 'b'.repeat(40);
+    const BASE_SHA = 'c'.repeat(40);
+    const mg = (headRef = `refs/heads/gh-readonly-queue/main/pr-7-${BASE_SHA}`) => ({
+      eventName: 'merge_group',
+      sha: MG_SHA,
+      payload: { merge_group: { head_sha: MG_SHA, head_ref: headRef, base_ref: 'refs/heads/main' } },
+    });
+    const only = (c) => c.statuses.length === 1 ? c.statuses[0] : null;
+
+    let c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(),
+      commitStatuses: [st('digest-cooldown', 'success')] });
+    let s1 = only(c);
+    check('merge_group: PR head success is mirrored as success on the merge-group head',
+      s1 && s1.sha === MG_SHA && s1.state === 'success' && s1.context === 'digest-cooldown');
+    check('merge_group: the PR head statuses are read from the PR number in the queue ref',
+      c.statusListCalls.length === 1 && c.statusListCalls[0].ref === SHA);
+    check('merge_group: no comment is touched', c.created.length === 0 && c.updated.length === 0);
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(),
+      commitStatuses: [st('digest-cooldown', 'pending')] });
+    s1 = only(c);
+    check('merge_group: PR head pending stays pending on the merge-group head',
+      s1 && s1.sha === MG_SHA && s1.state === 'pending');
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(), commitStatuses: [] });
+    s1 = only(c);
+    check('merge_group: missing PR head status is fail-closed (pending)',
+      s1 && s1.sha === MG_SHA && s1.state === 'pending' && /missing/.test(s1.description));
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(),
+      commitStatuses: [st('digest-cooldown', 'success', { creator: 'mallory' })] });
+    s1 = only(c);
+    check('merge_group: success posted by an untrusted creator is fail-closed (pending)',
+      s1 && s1.state === 'pending' && /untrusted-creator/.test(s1.description));
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(),
+      commitStatuses: [st('digest-cooldown', 'pending', { updatedAt: '2026-06-01T00:00:00Z' }), st('digest-cooldown', 'success', { updatedAt: '2026-06-02T00:00:00Z' })] });
+    s1 = only(c);
+    check('merge_group: only the latest PR head status counts (older pending does not veto)',
+      s1 && s1.state === 'success');
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg('refs/heads/gh-readonly-queue/main/not-a-queue-ref'),
+      commitStatuses: [st('digest-cooldown', 'success')] });
+    s1 = only(c);
+    check('merge_group: an unparseable queue ref is fail-closed (pending)',
+      s1 && s1.state === 'pending' && c.statusListCalls.length === 0);
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(), failStatusList: true });
+    s1 = only(c);
+    check('merge_group: statuses API failure is fail-closed (pending)',
+      s1 && s1.state === 'pending' && /failed to read/.test(s1.description));
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(), failPullGet: true });
+    s1 = only(c);
+    check('merge_group: pulls API failure is fail-closed (pending)',
+      s1 && s1.state === 'pending');
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(),
+      commitStatuses: [st('digest-cooldown', 'success')], env: { MERGE_GROUP_STATUS_CREATORS: '' } });
+    s1 = only(c);
+    check('merge_group: empty creators allowlist skips creator verification',
+      s1 && s1.state === 'success');
+
+    c = await run({ diff: '', today: '2026-06-03', contextExtra: mg(),
+      commitStatuses: [st('digest-cooldown', 'success')], env: { DRY_RUN: 'true' } });
+    check('merge_group: dry-run posts nothing', c.statuses.length === 0);
   }
 
   console.log('');

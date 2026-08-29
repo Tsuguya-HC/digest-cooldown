@@ -158,6 +158,17 @@ inputs:
       write 権限保有者に対する防御ではありません。
     required: false
     default: github-actions[bot]
+  merge-group-status-creators:
+    description: >-
+      merge_group イベントで PR head の `digest-cooldown` status を読むときの
+      投稿者（Statuses API の `creator.login`）allowlist（カンマ区切り）。マージキューの
+      一時 commit には PR head で確定済みの判定を転記するだけなので、その元 status が
+      この action 自身（既定の `GITHUB_TOKEN` なら `github-actions[bot]`）の投稿で
+      あることを要求します。含まれない主体の status は success でも pending に倒します
+      （fail-closed）。カスタム token で status を投稿している場合はその login を設定して
+      ください。空文字にすると creator を検証しません。
+    required: false
+    default: github-actions[bot]
   github-token:
     description: Token used for API calls (needs statuses:write, pull-requests:write)
     required: false
@@ -181,6 +192,7 @@ runs:
         BYPASS_LABEL: ${{ inputs.bypass-label }}
         BYPASS_REQUIRES_STATUS: ${{ inputs.bypass-requires-status }}
         BYPASS_REQUIRES_STATUS_CREATORS: ${{ inputs.bypass-requires-status-creators }}
+        MERGE_GROUP_STATUS_CREATORS: ${{ inputs.merge-group-status-creators }}
       with:
         github-token: ${{ inputs.github-token }}
         # extractScript-anchor: digest-cooldown-bridge

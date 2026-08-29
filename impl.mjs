@@ -738,6 +738,70 @@ export async function run({ github, context, core }) {
     });
   };
 
+  // Merge queue. A merge_group run has no PR of its own: GitHub builds a
+  // temporary commit on `gh-readonly-queue/<base>/pr-<N>-<base_sha>` and the
+  // required contexts must be reported on *that* commit, otherwise the queue
+  // entry never merges. The cooldown itself was already decided on the PR
+  // head (a PR cannot enter the queue until `digest-cooldown` is success
+  // there), and the digests in the group are exactly those of that head, so
+  // the verdict carries over: read the PR head's latest `digest-cooldown`
+  // status, require it to be success and posted by a trusted creator, and
+  // mirror it onto the merge-group head. Anything else (missing, pending,
+  // untrusted creator, unparseable ref, API failure) posts pending, which is
+  // the fail-closed side for a required check.
+  if (context.eventName === 'merge_group') {
+    const MERGE_GROUP_STATUS_CREATORS = (process.env.MERGE_GROUP_STATUS_CREATORS || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const mg = (context.payload && context.payload.merge_group) || {};
+    const headSha = String(mg.head_sha || context.sha || '');
+    const headRef = String(mg.head_ref || '');
+    const pending = async (why) => {
+      core.warning(`digest-cooldown (merge group): ${why}`);
+      await setStatus(headSha, 'pending', `merge group: ${why}`);
+    };
+    if (!/^[0-9a-f]{40}$/.test(headSha)) {
+      core.warning('digest-cooldown (merge group): no usable merge-group head SHA; nothing to report on');
+      return;
+    }
+    const m = /\/pr-(\d+)-[0-9a-f]{40}$/.exec(headRef);
+    if (!m) {
+      await pending(`cannot derive the PR number from ref '${headRef}'`);
+      return;
+    }
+    const prNumber = Number(m[1]);
+    try {
+      const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+      const prHead = String((pr.head && pr.head.sha) || '');
+      if (!/^[0-9a-f]{40}$/.test(prHead)) {
+        await pending(`PR #${prNumber} has no readable head SHA`);
+        return;
+      }
+      const statuses = await github.paginate(
+        github.rest.repos.listCommitStatusesForRef,
+        { owner, repo, ref: prHead, per_page: 100 },
+      );
+      if (!Array.isArray(statuses)) {
+        throw new TypeError(`unexpected commit-status list response type '${typeof statuses}'`);
+      }
+      const latest = latestStatusForContext(statuses, CONTEXT);
+      const st = resolveRequiredStatus(latest ? [latest] : [], CONTEXT, MERGE_GROUP_STATUS_CREATORS);
+      if (st !== 'success') {
+        await pending(`PR #${prNumber} head ${prHead.slice(0, 12)} has ${CONTEXT} = ${st || 'missing'}`);
+        return;
+      }
+      await setStatus(headSha, 'success',
+        `mirrors ${CONTEXT} success on PR #${prNumber} head ${prHead.slice(0, 12)}`);
+      core.info(`merge group for PR #${prNumber}: ${CONTEXT} success on head ${prHead.slice(0, 12)} -> success on ${headSha.slice(0, 12)}`);
+    } catch (e) {
+      try {
+        await pending(`failed to read PR #${prNumber}: ${e.message}`);
+      } catch (e2) {
+        core.warning(`digest-cooldown (merge group): also failed to post the fail-closed pending status: ${e2.message}`);
+      }
+    }
+    return;
+  }
+
   // Enumerate target PRs.
   let prs;
   if (PR_NUMBER) {

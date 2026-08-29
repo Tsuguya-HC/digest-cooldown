@@ -85,6 +85,28 @@ Required is strictly stronger than advisory. Renovate's own automerge honours
 non-required statuses, but GitHub's native auto-merge (`platformAutomerge`)
 only waits for the required ones.
 
+### Merge queue
+
+A merge queue re-runs the required checks on a temporary commit
+(`gh-readonly-queue/<base>/pr-<N>-<base_sha>`), and the status must be
+reported on *that* commit. Subscribe the workflow to `merge_group` as well:
+
+```yaml
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+  merge_group:
+```
+
+On a `merge_group` run the action does not re-evaluate the diff. A PR cannot
+enter the queue until `digest-cooldown` is success on its head, and the group
+carries exactly that head's digests, so the action reads the latest
+`digest-cooldown` status on the PR head, requires it to be success and posted
+by a trusted creator (`merge-group-status-creators`, default
+`github-actions[bot]`), and mirrors it onto the merge-group head. Anything
+else — missing, pending, an untrusted creator, an unparseable queue ref, an
+API failure — posts pending, so the entry waits rather than merges.
+
 ## Gotchas
 
 **A self-hosted Renovate is not `renovate[bot]`.** Running Renovate as your own

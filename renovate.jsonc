@@ -30,7 +30,7 @@
         "our own reusable workflow only delays fixes to the thing that gates every",
         "other check."
       ],
-      "matchPackageNames": ["Tsuguya/**"],
+      "matchPackageNames": ["Tsuguya-HC/**"],
       "minimumReleaseAge": "0"
     },
     {

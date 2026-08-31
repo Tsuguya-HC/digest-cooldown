@@ -42,7 +42,7 @@ jobs:
       pull-requests: write   # store first-seen dates in a PR comment
       contents: read         # read the diff
     steps:
-      - uses: Tsuguya/digest-cooldown@<sha>  # v1.0.0
+      - uses: Tsuguya-HC/digest-cooldown@<sha>  # v1.0.0
         with:
           cooldown-days: 3
           skip-registries: registry.example.com,ghcr.io/myorg

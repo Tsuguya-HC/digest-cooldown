@@ -131,7 +131,20 @@ const TARGET_URL = 'https://github.com/renovatebot/renovate/issues/38656';
 // （「`@sha256:` を含まない行は matchAll を回さない」事前フィルタは digest を
 // 全く含まない行にのみ効き、near-miss には効かない点に注意。だから行長キャップが
 // 別に必要になる。）
-export const REF = /((?:\$\{[^{}]*\}|\})*(?:[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]+\/)?[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?)@(sha256:[0-9a-f]{64})/g;
+//
+// name 部（展開クロージャを除く）は下の IMAGE_NAME でも「1 行に収まっていない ref」の
+// 名前候補を検証するのに使うので、**同じ 1 つのソース**から両方を組み立てる。
+// 2 箇所に literal を持つと、片方だけ直した非対称（REF は port を認めるのに
+// 名前候補は認めない等）が静かに入り込む。従来の literal と byte 等価。
+const REF_NAME_SRC = '(?:[A-Za-z0-9][A-Za-z0-9._-]*:[0-9]+/)?[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?';
+export const REF = new RegExp(`((?:\\$\\{[^{}]*\\}|\\})*${REF_NAME_SRC})@(sha256:[0-9a-f]{64})`, 'g');
+
+// 「1 行に収まっていない ref」（下の SPLIT_TAG_KEYS 参照）の名前側フィールドが、
+// image name として妥当かを検査する。REF の name 部**そのもの**を全体一致で当てるので、
+// 展開クロージャ（`${...}` / `}`）を含む値はここで落ちる = 名前として採用されない。
+// REF 側でクロージャを name の先頭に吸収して fail-closed にしている設計（上のコメント）を、
+// 分割形式の解決でも崩さないための境界。
+const IMAGE_NAME = new RegExp(`^${REF_NAME_SRC}$`);
 
 // REF を走らせる 1 行の長さ上限（バイト = JS の文字数）。上の計算量メモのとおり
 // near-miss 行に対する REF は行長の二次なので、`@sha256:` を含む行がこの長さを
@@ -297,7 +310,14 @@ export const sameBody = (a, b) =>
 // cooldown from the original observation. Omitting it leaves the output
 // byte-identical to the historical render (the note's array entries are only
 // spread in when a label is present), preserving the golden/fuzz equivalence.
-export const renderComment = (state, names, cooldownDays, today, strategy, bypassLabel) => {
+// `unresolved`（任意）は「分割形式で書かれていて image 名 = registry を判定できなかった
+// digest」の一覧。判定不能は fail-closed 側（外部イメージとして冷却）に倒すが、外部だと
+// **判定できた**ケースと表示上まったく同じにしてしまうと、`skip-registries` が効いて
+// いないことに誰も気づけない（issue #21）。表の下に 1 行出して区別を残す。空/未指定なら
+// 配列展開が 0 件なので、従来の描画と byte 等価。
+export const renderComment = (state, names, cooldownDays, today, strategy, bypassLabel,
+  unresolved) => {
+  const unresolvedList = (unresolved || []).filter((d) => d in state).sort();
   const rows = Object.keys(state).sort().map((dig) => {
     const seenRaw = state[dig];
     // Display the calendar day only; the stored value may now carry a time.
@@ -319,6 +339,9 @@ export const renderComment = (state, names, cooldownDays, today, strategy, bypas
     '|---|---|---|---|',
     rows.join('\n'),
     '',
+    ...(unresolvedList.length
+      ? [`ℹ️ ${unresolvedList.length} digest(s) above are pinned in a split form (a tag field carrying the digest) whose image name is not in the diff, so \`skip-registries\` could not be applied and they are gated as external: ${unresolvedList.map((d) => `\`${d.slice(0, 19)}…\``).join(', ')}.`, '']
+      : []),
     ...(bypassLabel
       ? [`⚠️ Cooldown bypass label \`${bypassLabel}\` is attached: while it stays on this PR, the commit status reports **success** even if digests below are still cooling.`, '']
       : []),
@@ -420,26 +443,363 @@ export function isSkipRef(name, skipPrefixes) {
 // リネーム・挙動変更をするときは、本アクションのテスト（tests/test-digest-cooldown.mjs）
 // と verify-image-provenance のテスト（tests/test-verify-image-provenance.mjs）の
 // 両方を回すこと。
+// yield される `hunk` は hunk の通し番号。**連続性の保証**を呼び出し側に渡すために
+// ある: unified diff の 1 hunk 内では行が原ファイル上でも連続しているので、2 行の
+// 間にある行はすべて diff にも現れる。分割形式 ref の名前解決（resolveSplitNames）は
+// この連続性に依存して「間にインデントの浅い行が無い = 同じマッピングブロック」と
+// 判定するため、hunk をまたいだ結合を禁じる必要がある。追加フィールドなので、
+// `{ c, line }` を分割代入している既存の呼び出し側（verify-image-provenance 含む）は
+// そのまま動く。
 export function* hunkContentLines(diff) {
   let inHunk = true;
+  let hunk = 0;
   for (const line of diff.split('\n')) {
-    if (line.startsWith('@@ ')) { inHunk = true; continue; }
-    if (line.startsWith('diff --git ')) { inHunk = false; continue; }
+    if (line.startsWith('@@ ')) { inHunk = true; hunk++; continue; }
+    if (line.startsWith('diff --git ')) { inHunk = false; hunk++; continue; }
     if (!inHunk) { continue; }
     const c = line[0];
     if (c !== ' ' && c !== '+' && c !== '-') { continue; }
-    yield { c, line };
+    yield { c, line, hunk };
   }
 }
 
-// Return { digest: imageRef } for the external docker digests a diff
-// should gate. `digestCentric` selects the strategy (see the header
-// comment): the caller enables it only for in-scope PR authors, so a
-// non-scope author still gets the default pure-digest-bump baseline.
-// `isSkip(name)` tells whether an image ref is on the skip list; it is
-// injected so this function stays pure and directly unit-testable.
+// --- 1 行に収まっていない ref（分割形式）の名前解決 -------------------------
+//
+// REF は「1 行の中の `<name>[:tag]@sha256:<hex>`」しか取れない。ところが設定ファイルには
+// ref の構成要素を**複数フィールドに分けて**書く形式があり、digest が載る行に registry が
+// 無い。kustomize の `images:` が代表例:
+//
+//     images:
+//       - name: controller
+//         newName: registry.infra.tgy.io/tools/taskflow
+//         newTag: latest@sha256:<hex>
+//
+// この `newTag:` 行から REF が抽出する name は **`latest`**（tag であって名前ではない）。
+// `skip-registries: registry.infra.tgy.io` を設定していても一致しようがないので、
+// 自前レジストリのイメージが外部イメージとして冷却される = **設定に書いた意味が消える**
+// （issue #21。fail-closed 方向なので穴ではないが、上流 compromise の発覚待ち時間という
+// 本来存在しない前提を、自分でビルドして署名したイメージに課していた）。Helm values の
+// `image.repository` / `image.tag` 分割も同じ形。
+//
+// 解決方針は「digest が載っているフィールドが *tag* を意味するキーだったら、名前は同じ
+// マッピングブロックの兄弟キーから採る」。走査単位（REF を回す行）は広げない — 広げると
+// MAX_SCAN_LINE の行長キャップと二次バックトラックの前提が引き直しになるため、
+// ここは**抽出済みの行に対する別の線形パス**として足す。
+//
+// 誤結合（別ブロックの名前を拾って skip 側に倒す fail-open）を防ぐ境界は 3 つ:
+//   1. hunk をまたがない（上の hunkContentLines の `hunk`）。hunk 内なら行は原ファイル上でも
+//      連続なので、ブロックの切れ目（インデントが浅くなる行）は必ず diff に現れる
+//   2. インデントが浅くなった時点で深い側の名前を捨てる（親キーが変われば別ブロック）
+//   3. リスト項目（`- `）の開始で同じインデントの名前を捨てる（`images:` の項目ごとに独立）
+// さらに side（`+` / `-`）ごとに独立に解決する。context 行（' '）は両側に属する。
+const SPLIT_TAG_KEYS = new Set(['newtag', 'tag']);
+// 名前を供給するキー。kustomize では `newName` が `name`（base 側のマッチ対象名）を
+// 置き換える実体、Helm では `repository` が実体で `image` は 1 行形式との併用が多い。
+//
+// `name` / `image`（旧「weak」キー）は意図的に採用しない。これらは「同じブロックに
+// **見えていないだけの** `newName` / `repository` が存在すると、実際に pull される側は
+// そちらに上書きされる」立場の値なので、単独で採用すると diff の可視範囲（既定 3 行
+// コンテキスト）の外に追い出された `newName` / `repository` に上書きされる名前で
+// skip 判定してしまう（攻撃者はコメント行を挟むだけで `newName` を窓の外に出せる）。
+// `newName` / `repository` は 1 ブロックにつき高々 1 つで、他のキーに上書きされる
+// 立場ではないため単独採用してよい — この非対称が weak キー撤去の根拠。結果として
+// `newName` / `repository` の無い `- name: X` だけの kustomize entry は解決不能になる
+// （= gate + 判定不能の callout）。これは意図した fail-closed。
+const SPLIT_NAME_KEYS = new Set(['newname', 'repository']);
+
+// Bitnami 系 chart 等が使う `registry` + `repository` + `tag` の 3 分割形式の
+// 1 つ目のキー。**名前を供給するキーとしては扱わない**: `registry + '/' + repository`
+// を合成する案は採らない。chart が実際には `.registry` を読まない（Helm は知らない
+// values キーを黙って捨てる）場合、合成した名前は実在しない ref になり、それが
+// たまたま skip-registries に一致すると密輸経路になる（実際に pull されるのは
+// `repository` 単体が指す docker.io 側）。代わりに「`repository` 単独での解決を
+// 無効化するキー」として扱う: 同じブロックに `registry:` があるとき、その
+// `repository` 由来の名前は解決不能（unresolved）に倒す（fail-closed のまま
+// 「判定不能」として可視化する）。
+const SPLIT_REGISTRY_KEY = 'registry';
+
+// `[indent]key: value` を取る。`- ` 付きのリスト項目では、**キーの開始桁**を indent と
+// する（`  - name:` と `    newName:` は同じブロックの兄弟なので桁が揃う）。
+// 全 content 行に対して回るので線形であることが要件: `^` 固定 + 空白とキー文字が
+// 素の文字集合として排他なので、失敗時のバックトラックは行長に対して線形に収まる
+// （assertKnownDigestAlgos と同じ理由で、ここに行長キャップは置かない — 無関係な長い行を
+// 永久 pending にしてしまうため）。`d` フラグ（hasIndices）は group 4（値）の開始位置を
+// `m.indices[4][0]` で取るために付けている。tag スカラーの値レンジ（下の
+// resolveSplitNames 参照）を content 行座標で求めるのに使う。
+const KEY_LINE = /^([ \t]*)(-[ \t]+)?([A-Za-z0-9][A-Za-z0-9._-]*)[ \t]*:[ \t]*(.*)$/d;
+
+// YAML スカラーの見た目を落とす（引用符・行末コメント）。値の妥当性判定は呼び出し側の
+// IMAGE_NAME に任せるので、ここは「囲いを外す」だけに留める。`start` / `end` は
+// 「囲いを外した後の値」が `raw`（呼び出し側で言えば KEY_LINE の group 4）の中で
+// 占めるオフセット。tag キーの行では、この値レンジと REF マッチの範囲を突き合わせて
+// 「スカラー値に完全に収まるマッチだけ差し替える」境界に使う（A。詳しくは
+// resolveSplitNames と parseDiff の blockNameFor を参照）。
+const scalarValue = (raw) => {
+  const v = raw.trim();
+  const q = v[0];
+  if (q === '"' || q === "'") {
+    const end = v.indexOf(q, 1);
+    const value = end === -1 ? v.slice(1) : v.slice(1, end);
+    return { value, start: 1, end: 1 + value.length };
+  }
+  const comment = v.indexOf(' #');
+  const value = (comment === -1 ? v : v.slice(0, comment)).trim();
+  return { value, start: 0, end: value.length };
+};
+
+// content 行の配列に対し、同じ添字で「その行が tag キーなら、同じブロックが供給する
+// image 名（無ければ null）と、tag スカラー自身の値レンジ（content 行座標、A）」を
+// `{ name, start, end }` で返す。tag キーでない行は undefined。前方 / 後方の 2 パス
+// （× side 2 通り）をいずれも線形で回すので、全体で O(行数)。
+//
+// 名前を供給するのは SPLIT_NAME_KEYS（`newName` / `repository`）だけ（B）。
+//
+// 1 ブロックにつき候補は**集合**として集める（`names` / `nameKeys`）。「1 ブロック
+// 1 名前」という前提は攻撃者制御の diff では成り立たない: `newName` は kustomize
+// が、`repository` は Helm が読むキーで、**読む道具が違う**。両方を同じブロックに
+// 書けば、片方は実際に pull されず、もう片方だけを実行系が読む状況を diff の
+// 見た目だけで作れる（例: values.yaml に本物の `repository:` を残したまま
+// `newName:`（kustomize 専用、Helm は黙って捨てる）を 1 行足すだけで、そちらが
+// 「実効名」として採用されてしまう）。distinct な候補が 2 つ以上あるときは、diff
+// を読むだけではどちらが実際の実効名か決められないので**解決しない**（曖昧さは
+// fail-closed。`name: null` = unresolved → gate + callout。詳細は下の最終マージ）。
+//
+// registry キーの扱い（C）: `repository` 由来の名前は、同じブロックに `registry:`
+// があれば無条件で unresolved（`name: null`）に倒す。判定は `hasRegistry &&
+// nameKeys.has('repository')` — 「採用された名前が repository 由来か」ではなく
+// 「repository というキーがこのブロックの候補に含まれているか」で見るのが要点
+// （candidate が 2 つ以上あるケースと合わせて同じ穴を閉じる）。
+// ここは **各パスの内側で invalidated を確定させてから OR してはいけない**（一度
+// そう書いて fail-open になった実装ミスの記録）。前方パスは「`registry:` が tag
+// より前」にあるときしか観測できず、後方パスは「`registry:` が tag より後ろ」に
+// あるときしか観測できないので、`repository:` と `registry:` が tag 行を挟んで
+// 反対側にあると、forward / backward のどちらの `here()` も「name と hasRegistry
+// が両方そろった状態」には決して至らない。同じ理由で `names` / `nameKeys` も
+// 前方パスと後方パスの**和集合**でなければならない: `newName` と `repository` が
+// tag 行を挟んで反対側にあると、片方向のパスだけでは候補が半分しか集まらず、
+// 曖昧さそのものを取りこぼす。肯定条件（候補が見つかった）も否定条件（「このブロック
+// に registry: が"ある"」）も、両方向の観測を先にマージしてから判定しなければ
+// ならない（B で塞いだ「見えていない strong に上書きされる」と同じ穴の別形）。
+// そのため各パスは「観測した候補名の集合・供給キーの集合・registry: が見えたか」を
+// 生の事実として記録するだけに留め（下の record）、name / invalidated の判定は
+// 最終マージ（下の return）で 1 回だけ行う。
+//
+// module 内部専用（cross-import の公開面ではない）。verify-image-provenance も同じ
+// skip-registries を同じ意味で持つ以上、いずれ同じ解決が要るはずだが、そのときは
+// この関数ごと共有する（判定を 2 実装持つと、片側だけ直した非対称が
+// isSkipRef で一度起きたのと同じ形で戻ってくる）。姉妹アクション側は現時点では
+// 分割形式 ref を一切解決しない非対称が既知で残っている（action.yml 参照）。
+function resolveSplitNames(content) {
+  const before = new Array(content.length);
+  const after = new Array(content.length);
+  const isTagLine = new Array(content.length).fill(false);
+
+  for (const side of ['+', '-']) {
+    for (const forward of [true, false]) {
+      const out = forward ? before : after;
+      // インデントは入れ子なのでスタック規律に従う（末尾ほど深い）。Map + 全キー
+      // 走査でも同じ結果になるが、それだと 1 行あたり O(保持段数) 掛かる（行長を
+      // 深さに使える PR 作者制御の入力なので、全体では入力サイズに比例して伸びる）。
+      // pop で閉じれば償却 O(1) で、行ごとの割り当ても要らない。
+      const levels = [];
+      const top = () => (levels.length ? levels[levels.length - 1] : null);
+      let hunk = null;
+      const n = content.length;
+      for (let step = 0; step < n; step++) {
+        const i = forward ? step : n - 1 - step;
+        const { c, line, hunk: h } = content[i];
+        if (c !== side && c !== ' ') { continue; }
+        // context 行（' '）は両側のパスを通る（どちらの側の名前も供給しうる）が、
+        // **記録するのは base 側のパスだけ**にする。同じ添字を 2 回書くと結果が
+        // パスの実行順に依存してしまうため。context 行に載った ref は base 側の
+        // ref としてしか使われない（digest-centric では base、pure-bump では無視）
+        // ので、base 側の解決結果が採るべき答えになる。
+        const recordHere = (c === ' ' ? '-' : c) === side;
+        if (h !== hunk) { levels.length = 0; hunk = h; }
+        // CRLF 対応: JS の `.`（KEY_LINE の group 4）は行末終端文字（`\r` 含む）を
+        // 除外するのに、`$` は入力の絶対末尾にしかマッチしない（`/m` 無し）。CRLF
+        // 改行のリポでは行末に `\r` が残ったまま KEY_LINE に渡ると `.*` が `\r` の
+        // 手前で止まり `$` と噛み合わず**マッチそのものが失敗し**、この行が
+        // `key: value` として一切認識されない（skip-registries が丸ごと no-op に
+        // なり、callout も出ない黙った壊れ方 — issue #21 の症状そのまま）。ここで
+        // 落とすのは末尾の 1 文字だけなので、下のオフセット計算（`m.indices[4][0]`
+        // 基準）は崩れない。`hunkContentLines` 自体は姉妹アクションとの共有面
+        // なのでそちらは触らない。
+        const body = line.slice(1);
+        const clean = body.endsWith('\r') ? body.slice(0, -1) : body;
+        const m = KEY_LINE.exec(clean);
+        if (!m) { continue; }
+        const indent = m[1].length + (m[2] ? m[2].length : 0);
+        const key = m[3].toLowerCase();
+        const item = Boolean(m[2]);
+        // 深いブロックは閉じた。前方でも後方でも「インデントが浅い行を挟んだら別ブロック」。
+        while (levels.length && top().indent > indent) { levels.pop(); }
+        // リスト項目の開始は、同じインデントに積まれた候補（隣の項目のもの）を閉じる。
+        const closeItem = () => { if (item && top() && top().indent === indent) { levels.pop(); } };
+        const here = () => (top() && top().indent === indent ? top() : null);
+        const openLevel = () => {
+          let lv = here();
+          if (!lv) { levels.push(lv = { indent, names: new Set(), nameKeys: new Set() }); }
+          return lv;
+        };
+        const applyOwn = () => {
+          if (key === SPLIT_REGISTRY_KEY) {
+            openLevel().hasRegistry = true;
+            return;
+          }
+          if (!SPLIT_NAME_KEYS.has(key)) { return; }
+          const value = scalarValue(m[4]).value;
+          if (!IMAGE_NAME.test(value)) { return; }
+          const lv = openLevel();
+          lv.names.add(value);
+          lv.nameKeys.add(key);
+        };
+        const record = () => {
+          if (!SPLIT_TAG_KEYS.has(key) || !recordHere) { return; }
+          isTagLine[i] = true;
+          const sv = scalarValue(m[4]);
+          // +1: KEY_LINE は line.slice(1)（CRLF なら末尾の `\r` も落とした clean）に
+          // 対して exec しているので、content 行（先頭の +/-/ を含む）座標に揃える
+          // には group 4 の開始位置に 1 を足す。`\r` を落としたのは末尾だけなので、
+          // 先頭からの相対位置（= このオフセット計算）には影響しない。
+          const base = 1 + m.indices[4][0];
+          const lv = here();
+          // ここでは name / invalidated を確定させない（上のコメント参照）。この
+          // 方向から観測できた生の事実（候補名の集合・供給キーの集合・registry:
+          // が見えたか）だけを積む。集合は同じ添字を 2 回書き換えないよう、この
+          // 時点でのスナップショット（コピー）を取る — `lv` はこの後も同じパス内で
+          // 変異し続けるので、参照のまま持つと未来の行の追加が過去の記録を
+          // 書き換えてしまう。
+          out[i] = {
+            names: lv ? new Set(lv.names) : new Set(),
+            nameKeys: lv ? new Set(lv.nameKeys) : new Set(),
+            hasRegistry: Boolean(lv && lv.hasRegistry),
+            start: base + sv.start,
+            end: base + sv.end,
+          };
+        };
+        if (forward) {
+          // 前方: リスト項目の開始で、直前の項目が置いた候補を捨ててから自分を積む。
+          closeItem();
+          applyOwn();
+          record();
+        } else {
+          // 後方: いま持っている状態は「この行より後ろ」の候補。自分を積んで記録し、
+          // 自分がリスト項目の開始なら、ここより前の行は別項目なので捨てる。
+          applyOwn();
+          record();
+          closeItem();
+        }
+      }
+    }
+  }
+  return content.map((_, i) => {
+    if (!isTagLine[i]) { return undefined; }
+    const b = before[i];
+    const a = after[i];
+    // 候補名 / 供給キー / registry の有無は、いずれも前方・後方の**和集合**で決める
+    // （上のコメント参照）。片方向だけでは「見えていないだけ」を「無い」/「1 つだけ」
+    // と誤読する fail-open になる。
+    const names = new Set([...(b?.names ?? []), ...(a?.names ?? [])]);
+    const nameKeys = new Set([...(b?.nameKeys ?? []), ...(a?.nameKeys ?? [])]);
+    const hasRegistry = Boolean(b?.hasRegistry || a?.hasRegistry);
+    const invalidated = hasRegistry && nameKeys.has('repository');
+    // distinct な候補がちょうど 1 つのときだけ解決する。0 個（候補なし）も 2 個
+    // 以上（曖昧）も同じ `null`（unresolved）に倒す — 呼び出し側は元々この 2 つを
+    // 区別していない。
+    const name = invalidated || names.size !== 1 ? null : [...names][0];
+    return {
+      name,
+      start: (b ?? a).start,
+      end: (b ?? a).end,
+    };
+  });
+}
+
+// 1 本の REF マッチに対して、gate / skip 判定に使う実効的な image 名を決める。
+// 差し替えるのは「tag を意味するキーの値から抽出された、registry を持ちようのない名前」
+// だけ: `/` を含む時点でそれは（少なくとも構文上は）完全な名前なので、行の書式に
+// 関わらずそのまま扱う。`${...}` 吸収済みの名前は IMAGE_NAME に一致しないので
+// 差し替え対象から外れ、skip 密輸の穴を塞いだ設計（REF のコメント）が保たれる。
+// 解決できなかった分割形式は raw のまま返し、`unresolved: true` を立てて呼び出し側に
+// 「registry を判定できなかった」ことを伝える（黙って外部イメージ扱いにしない）。
+// 呼び出し元（parseDiff の blockNameFor）は、tag スカラーの値と完全一致する REF
+// マッチにだけ解決結果（`blockName`）を渡す（A）。マッチしないケースは `blockName`
+// が undefined のまま届き、この関数は raw を素通しする。
+// 返り値の `name` は gate / skip の**信頼判定**にのみ使う。pure-bump の「同じ tag か」
+// という**同一性判定**（bump の key）にはこの解決名を混ぜない — 解決状態（diff の
+// 見え方次第で変わりうる）を同一性の判定に使うと、名前行の有無だけで bump の
+// key が割れて gate が消える別の穴になる（Round 2、下の parseDiff 参照）。
+function effectiveRefName(raw, blockName) {
+  if (blockName === undefined) { return { name: raw, unresolved: false }; }
+  if (raw.includes('/') || !IMAGE_NAME.test(raw)) { return { name: raw, unresolved: false }; }
+  if (blockName === null) { return { name: raw, unresolved: true }; }
+  return { name: blockName, unresolved: false };
+}
+
+// Return `{ gated, unresolved }` for a diff. `gated` maps digest -> imageRef,
+// the external docker digests a diff should gate (the shape this function
+// used to return bare). `unresolved` maps digest -> token for the *gated*
+// digests whose split-form image name could not be resolved (F: this used to
+// be a 4th `onUnresolvedName(digest, token)` callback; folded into the return
+// value instead because this codebase has no other precedent for reporting
+// output via an injected side-effect callback -- `isSkip` below is the
+// opposite shape, an *input* injection, not an output channel). `digestCentric`
+// selects the strategy (see the header comment): the caller enables it only
+// for in-scope PR authors, so a non-scope author still gets the default
+// pure-digest-bump baseline. `isSkip(name)` tells whether an image ref is on
+// the skip list; it is injected so this function stays pure and directly
+// unit-testable.
 export function parseDiff(diff, digestCentric, isSkip) {
   const gated = {};
+  const unresolved = {};
+  // 分割形式の名前解決は行をまたぐので、走査の前に content 行を 1 度だけ配列化する
+  // （hunkContentLines 自体は generator のまま = 他アクションとの共有面は不変）。
+  const content = [...hunkContentLines(diff)];
+  const blockNames = resolveSplitNames(content);
+  // REF の 1 マッチが、そのマッチが載っている行の tag スカラーの値と**完全一致**
+  // するときだけ、そのマッチを分割形式の解決対象にする（A、Round 2 で内包判定から
+  // 完全一致に強化）。tag フィールドの値が丸ごと 1 本の ref そのものであることだけが、
+  // その値を「この ref の tag 部分」と読んでよい唯一の根拠 — 値の中に余剰トークンが
+  // 1 文字でもあれば、値の意味は確定しない（どのトークンが「本当の tag」なのか
+  // ref token の文法だけでは決められない）。内包判定（マッチが値レンジに収まっていれば
+  // 良い）は、YAML の plain scalar として正当な形（タブ + `#`、カンマ区切り、
+  // スペース区切り、引用符内の 2 本目）で余剰トークンを足すだけで、2 本目の ref も
+  // 兄弟ブロックの信頼名に丸ごと吸収させてしまう fail-open だった（Round 1 の A の
+  // 穴がスカラー内部に移動しただけ）。完全一致なら、余剰トークンがある時点で
+  // 値全体のレンジがどのマッチの範囲とも一致しなくなるので、全マッチが raw のまま
+  // 通常の ref として扱われ、値の解釈が確定しない限り解決しない（fail-closed）。
+  // マッチしないケースは素通し — 差し替えると、たまたま同じ行に載っただけの
+  // 無関係な ref まで信頼レジストリ名に化けて gate を素通りする fail-open になる。
+  //
+  // 「tag 行ではない」（`b` が無い）と「tag 行だがスカラーとスパンが一致しなかった」
+  // は区別して返す: 前者は `undefined`（effectiveRefName は raw をただの通常 ref
+  // として素通しする — unresolved フラグも立てない）、後者は `null`（`b` はあるが
+  // このマッチはその値レンジと一致しない = 分割形式の tag 行なのに解決できなかった
+  // という判定不能）。この 2 つを undefined 1 つに潰すと、Round 2 の完全一致化で
+  // 解決から外れたケース（YAML として正当な行末コメントがたまたま `#` の直前に
+  // スペースを置いていない等）が、判定不能の可視化を経ずに黙って「通常の ref」
+  // として gate されてしまう（callout が出ない silent な抜け穴 — Round 3 実測）。
+  // effectiveRefName は既に `blockName === null` を unresolved 扱いにしているので、
+  // ここを直すだけで済む。
+  // ⚠️ digest-centric ではこの区別は**可視化のみ**（`gated` は不変、`unresolved` の
+  // 表示だけが変わる）だが、**pure-bump ではそうではない**: `unresolved` フラグは
+  // 下の pure-bump 節の `sameImage`（item 4 の初回 pin 免除の精密化）の
+  // `anyUnresolved` に流れ込み、**gate されるかどうかの判定そのものの入力**になる。
+  // ここを `undefined` に戻すと、判定不能な tag 行が「解決済みだが base と名前が
+  // 重ならない別イメージ」と誤断されて `sameImage` が偽になり、本来 fail-closed で
+  // gate されるべき同一 tag の digest bump が非 gate に落ちる（`sameImage` 側の
+  // コメントにも同じ結合を記している — 片方だけ読んだ保守者が気づけるように）。
+  const blockNameFor = (i, m) => {
+    const b = blockNames[i];
+    if (!b) { return undefined; }
+    if (m.index !== b.start || m.index + m[0].length !== b.end) { return null; }
+    return b.name;
+  };
+  // 3 箇所（下の digest-centric added / digest-centric base / pure-bump）で
+  // 同じ `effectiveRefName(m[1], blockNameFor(i, m))` を呼んでいたのを 1 つに畳む
+  // （このファイルが繰り返し踏んできた「片側だけ直した非対称」の再発地点を減らす）。
+  const resolve = (i, m) => effectiveRefName(m[1], blockNameFor(i, m));
   if (digestCentric) {
     // Digest-centric: gate every external docker digest newly
     // introduced by the PR -- present on a `+` content line but absent
@@ -450,7 +810,8 @@ export function parseDiff(diff, digestCentric, isSkip) {
     // and diff-boundary/metadata spoofing, and never skips a new digest.
     const baseDigests = new Set();
     const added = [];
-    for (const { c, line } of hunkContentLines(diff)) {
+    for (let i = 0; i < content.length; i++) {
+      const { c, line } = content[i];
       // A ref always contains the literal `@sha256:`; a line without it can
       // carry no digest, so skip it before running matchAll. This also caps
       // REF's cost on long non-ref lines (a ReDoS prefilter) -- matchAll is
@@ -459,22 +820,33 @@ export function parseDiff(diff, digestCentric, isSkip) {
       if (!line.includes('@sha256:')) { continue; }
       assertScannableLine(line);
       if (c === '+') {
-        for (const m of line.matchAll(REF)) { added.push({ name: m[1], digest: m[2] }); }
+        for (const m of line.matchAll(REF)) {
+          const { name, unresolved: unres } = resolve(i, m);
+          added.push({ name, digest: m[2], unresolved: unres });
+        }
       } else {
         // Only skip-*non*-listed base refs seed the base-trust set. A
         // skip-listed image is never gated, so its digest was never cooled
         // when introduced; letting it into baseDigests would exempt a
         // same-digest *non*-skip new ref that legitimately needs gating
         // (symmetry with the isSkip guard applied to added refs below).
-        for (const m of line.matchAll(REF)) { if (!isSkip(m[1])) baseDigests.add(m[2]); }
+        for (const m of line.matchAll(REF)) {
+          const { name } = resolve(i, m);
+          if (!isSkip(name)) baseDigests.add(m[2]);
+        }
       }
     }
-    for (const { name, digest } of added) {
-      if (!isSkip(name) && !baseDigests.has(digest)) {
-        gated[digest] = name;
-      }
+    // gated[digest] と unresolved[digest] は必ず**同じ added エントリ**から決める
+    // （E）。同一 digest が複数の added エントリを経由するとき gated[] は最後の
+    // エントリの後勝ちで決まる — unresolved の可視化もその同じ後勝ちエントリに
+    // 揃えないと、PR コメントの表と footer の注記が自己撞着する（解決済みの名前が
+    // 出ているのに「判定不能」と言う、またはその逆）。
+    for (const { name, digest, unresolved: unres } of added) {
+      if (isSkip(name) || baseDigests.has(digest)) { continue; }
+      gated[digest] = name;
+      if (unres) { unresolved[digest] = name; } else { delete unresolved[digest]; }
     }
-    return gated;
+    return { gated, unresolved };
   }
   // Default: gate a pure digest bump -- the same image:tag now carries
   // a different digest. Behaviourally identical to the historical
@@ -487,7 +859,7 @@ export function parseDiff(diff, digestCentric, isSkip) {
   // `line.slice(0, 3) === '---'` prefix check used to mistake for a file
   // header).
   //
-  // name -> Set<digest> (not a last-wins scalar): the same image:tag can
+  // key -> Set<digest> (not a last-wins scalar): the same image:tag can
   // legitimately appear more than once per side (a real bump plus a
   // reformatted duplicate of the old ref), and an attacker can re-list the
   // old digest last on the `+` side. A scalar last-occurrence-wins map
@@ -508,9 +880,51 @@ export function parseDiff(diff, digestCentric, isSkip) {
   // 投稿されないまま step が緑で終わる** fail-open になっていた（現在は catch 側も
   // fail-closed で pending を投げるようにしたが、二重に閉じておく）。
   // Map はキー空間がプロトタイプと交わらないので構造的に起こり得ない。
-  const oldByTag = new Map();  // name -> Set<digest>
-  const newByTag = new Map();  // name -> Set<digest>
-  for (const { c, line } of hunkContentLines(diff)) {
+  //
+  // key は**必ず raw tag トークン（`m[1]`）そのもの** — 分割形式で解決できた名前を
+  // 混ぜない（Round 2 で D を差し替え）。以前は解決名だけだと tag 情報が失われる
+  // ことを理由に `${解決名}:${raw}` の合成キーを使っていたが、それだと「名前行の
+  // 有無」という diff の見え方だけで同じ bump のキーが割れてしまう: 名前行を削除・
+  // 変更・追加するだけで base 側と head 側のキーが一致しなくなり、`olds` が
+  // undefined になって同一 tag の digest bump が丸ごと非 gate に落ちる（しかも
+  // head 側は unresolved のまま gate に到達しないので unresolved にも載らない —
+  // 「判定不能は fail-closed + 可視化」の原則が既定モードで崩れていた）。
+  // bump の**同一性判定**（このキー）は解決状態から独立させ、raw tag トークンだけで
+  // 決める（main と同じ土俵。1 行形式の ref はもともと raw トークンが `<name>:<tag>`
+  // を丸ごと含むので、この変更でも挙動は変わらない）。**信頼判定**（skip）は下の
+  // `pairNames` で別軸として持つ。
+  const oldByTag = new Map();  // key(raw tag token) -> Set<digest>
+  const newByTag = new Map();  // key(raw tag token) -> Set<digest>
+  // (key, digest) ペアごとに、`+` 側で観測した実効名（解決名 or raw のフォール
+  // バック）の集合と、最後の出現の {name, unresolved} を覚えておく。
+  //
+  // skip 判定は「そのペアに紐づく実効名が**全部** skip 一致のときだけ skip」— 1 つ
+  // でも非 skip があれば gate する。raw tag トークンは registry を持たないので
+  // （同じ `latest` を指す 2 つの無関係なブロックが同じキーを共有しうる）、片方の
+  // ブロックが信頼レジストリを指し、もう片方が信頼できないレジストリを指す状況が
+  // 起こりうる。ここで「1 つでも skip なら skip」（= some）にすると、信頼できる
+  // ブロックの存在が信頼できないブロックの digest まで skip 免除してしまう
+  // fail-open になる。「全部 skip のときだけ skip」なら、そのケースでも非 skip 側の
+  // digest は正しく gate される。
+  //
+  // 表示名 / unresolved は E の原則どおり最後の出現から採る**が、集合（信頼判定）と
+  // 代表値（表示）で採用条件が違う**: 集合には全出現を無条件に入れる（1 つでも
+  // 非 skip があれば gate すると判定するには、skip 側の出現も含めて全部見る必要が
+  // ある）一方、代表値（`name` / `unresolved`）は**非 skip の出現でしか更新しない**。
+  // ここを skip 側の出現でも無条件更新すると、gate を成立させた非 skip の出現より
+  // 後ろに skip 側の出現があるだけで、表の名前が「gate の原因でない信頼レジストリ」
+  // にすり替わる（fail-open ではないが、「PR コメントを見れば何が gate の原因か
+  // 分かる」という監査可能性そのものが壊れる — Round 3 実測）。digest-centric 側
+  // （上のブロック）は isSkip フィルタを通過したエントリだけを gated/unresolved に
+  // 書くので、信頼判定と表示名が構造的に同じ出現を共有する。ここでも同じ不変条件
+  // （表示名は必ず gate を成立させた非 skip の出現から採る）に揃える。
+  const pairNames = new Map();  // pairKey(key, digest) -> { names: Set<name>, anyUnresolved, name, unresolved }
+  // key ごとに、**base（`-`）側**で観測した実効名の集合と、1 つでも未解決な出現が
+  // あったかを覚えておく（item 4、下の「初回 pin 免除の精密化」で使う）。
+  const baseNamesByKey = new Map();  // key -> { names: Set<name>, anyUnresolved }
+  const pairKey = (key, digest) => `${key} ${digest}`;
+  for (let i = 0; i < content.length; i++) {
+    const { c, line } = content[i];
     const target = c === '+' ? newByTag : c === '-' ? oldByTag : null;
     if (!target) { continue; }
     assertKnownDigestAlgos(line);
@@ -519,24 +933,90 @@ export function parseDiff(diff, digestCentric, isSkip) {
     if (!line.includes('@sha256:')) { continue; }
     assertScannableLine(line);
     for (const m of line.matchAll(REF)) {
-      let set = target.get(m[1]);
-      if (!set) { target.set(m[1], set = new Set()); }
+      const key = m[1];
+      let set = target.get(key);
+      if (!set) { target.set(key, set = new Set()); }
       set.add(m[2]);
+      const { name, unresolved } = resolve(i, m);
+      if (c === '+') {
+        const pk = pairKey(key, m[2]);
+        let info = pairNames.get(pk);
+        if (!info) { pairNames.set(pk, info = { names: new Set(), anyUnresolved: false }); }
+        info.names.add(name);
+        if (unresolved) { info.anyUnresolved = true; }
+        if (!isSkip(name)) {
+          info.name = name;
+          info.unresolved = unresolved;
+        }
+      } else {
+        let binfo = baseNamesByKey.get(key);
+        if (!binfo) { baseNamesByKey.set(key, binfo = { names: new Set(), anyUnresolved: false }); }
+        binfo.names.add(name);
+        if (unresolved) { binfo.anyUnresolved = true; }
+      }
     }
   }
-  for (const [name, digests] of newByTag) {
-    if (isSkip(name)) { continue; }
-    const olds = oldByTag.get(name);
-    // name absent from the base = an initial pin, not a pure bump: left to
+  for (const [key, digests] of newByTag) {
+    const olds = oldByTag.get(key);
+    // key absent from the base = an initial pin, not a pure bump: left to
     // native minimumReleaseAge (default mode's historical scope).
     if (!olds) { continue; }
+    // key が base に**ある**ことは「同じ raw tag トークンの出現が base 側にも
+    // あった」以上の意味を持たない。分割形式では key が tag だけ（`latest` 等）で
+    // registry を持たないため、同じ diff 内の**無関係な 2 つのイメージ**がキーを
+    // 共有しうる（item 4）: 片方が `latest` を正当に bump し、もう片方がたまたま
+    // 同じ `latest` で初回 pin されただけでも、後者は前者の base 出現のおかげで
+    // 「base に既存の key」判定を通ってしまい、免除されるべき初回 pin が gate
+    // されていた。1 行形式では key（raw トークン）が実効名そのものなので起こらない
+    // 事故 — 分割形式だけが踏む非対称。
+    const base = baseNamesByKey.get(key) ?? { names: new Set(), anyUnresolved: false };
+    // 名前の重なり判定は normalizeImageName を通してから行う。isSkipRef が
+    // prefix / ref の両側を normalizeImageName で正規化して比較しているのと
+    // 対称に揃える — ここだけ生文字列比較だと、`docker.io/` 別名で綴りが変わる
+    // だけの本当に同一のイメージ（`docker.io/bitnami/nginx` と `bitnami/nginx`）が
+    // 「別イメージの初回 pin」に誤判定されて免除されてしまう（このリポが繰り返し
+    // 記録してきた「片側だけ正規化して非対称になる」バグの別形）。正規化は
+    // **一致しやすくなる方向**にしか働かないので、`sameImage` が真になりやすくなる
+    // だけ = より多く bump として gate される（fail-closed 方向）で安全側。
+    // 限界: Docker 公式イメージの暗黙 `library/` 補完は normalizeImageName が
+    // 行わない（同関数のコメント参照）ので、`nginx` と `docker.io/library/nginx`
+    // はここでも依然一致しない。
+    const baseNormNames = new Set([...base.names].map((n) => normalizeImageName(n)));
     for (const digest of digests) {
       // A new digest under a tag that already existed in the base = a bump.
       // A digest also present in the base is unchanged (reformat/re-listing).
-      if (!olds.has(digest)) { gated[digest] = name; }
+      if (olds.has(digest)) { continue; }
+      const info = pairNames.get(pairKey(key, digest));
+      if ([...info.names].every((n) => isSkip(n))) { continue; }
+      // 初回 pin 免除の精密化（item 4）: 同一性キーは解決状態から独立させたまま
+      // （Round 2 の理由は生きている — 名前行の削除/変更/追加でキーが割れて
+      // 非 gate になる穴を再開通させない）、**初回 pin 免除だけ**を名前で絞り込む。
+      // base 側とこの (key, digest) の head 側が「同じイメージを指しうる」のは:
+      //   - どちらかの実効名が解決できていない（ambiguous → 同じ image かもしれない
+      //     ことを否定できないので fail-closed 側 = gate する）、または
+      //   - 解決できた実効名同士が正規化後に 1 つでも重なる（本当に同じ image の bump）
+      // という条件。両方とも解決できていて、かつ名前が 1 つも重ならないときだけ
+      // 「たまたま同じ tag トークンを共有する別イメージ」と断定して免除する。
+      // `anyUnresolved`（base / info とも）は blockNameFor が「tag 行だがスパンが
+      // 一致しなかった」を `null` で返すことに由来する（上のコメント参照）。
+      // digest-centric ではその区別は可視化のみだが、ここ（pure-bump）では
+      // `anyUnresolved` を経由して **gate 判定そのものの入力**になる —
+      // 判定不能な出現を「解決済みで名前が重ならない別イメージ」と誤断しないための
+      // 結合であり、意図した依存。
+      const sameImage = base.anyUnresolved || info.anyUnresolved
+        || [...info.names].some((n) => baseNormNames.has(normalizeImageName(n)));
+      if (!sameImage) { continue; }
+      // `info.name` は必ず設定済み: この for ループへ来る時点で `info.names` に
+      // 非 skip の要素が最低 1 つある（直上の every(isSkip) を抜けた）ので、
+      // その出現で `info.name` が上で更新されている（skip 側の出現しか無ければ
+      // `info.name` は undefined のままここへは来ない）。
+      gated[digest] = info.name;
+      // 同じ (key, digest) ペアの最後の**非 skip**出現から gated[] と unresolved[]
+      // を決める（E、上の digest-centric 側と同じ理由）。
+      if (info.unresolved) { unresolved[digest] = info.name; } else { delete unresolved[digest]; }
     }
   }
-  return gated;
+  return { gated, unresolved };
 }
 
 // Decide whether a PR gets the broad digest-centric strategy or the
@@ -895,7 +1375,29 @@ export async function run({ github, context, core }) {
           `unable to read the PR diff (unexpected response type '${typeof diff}'); cooldown not cleared`);
         continue;
       }
-      const gated = parseDiff(diff, digestCentric, isSkip);
+      // 分割形式で image 名（= registry）を判定できなかった gate 対象。fail-closed 側
+      // （外部イメージとして冷却）に倒すのは従来どおりだが、判定**できた**外部イメージと
+      // 見分けが付かないまま黙って冷却するのはやめる（issue #21）。ログと PR コメントの
+      // 両方に出して、`skip-registries` が効いていないことを気づけるようにする。
+      // F: parseDiff は onUnresolvedName コールバックではなく { gated, unresolved } を
+      // 返す（この codebase に「出力を副作用コールバックで返す」先例が無い。isSkip は
+      // 逆に *入力* の注入であって性質が違う）。
+      const { gated, unresolved } = parseDiff(diff, digestCentric, isSkip);
+      const unresolvedEntries = Object.entries(unresolved);
+      if (unresolvedEntries.length > 0) {
+        // G: core.warning に埋め込む前に、renderComment の NAME_MAX 切り詰めと同じ
+        // ロジックで token を切り詰め、列挙件数にも上限を置く。トリムしないと
+        // PR 作者が制御する image 名候補を無制限に warning へ埋め込めてしまう
+        // （1 本あたり最大 4096B の PR-controlled 文字列 × 本数無制限）。
+        const WARN_LIST_MAX = 10;
+        const truncate = (s) => (s.length > NAME_MAX ? `${s.slice(0, NAME_MAX)}…` : s);
+        const shownEntries = unresolvedEntries.slice(0, WARN_LIST_MAX);
+        const shown = shownEntries
+          .map(([dig, token]) => `${truncate(token)}@${dig.slice(0, 19)}…`).join(', ');
+        const more = unresolvedEntries.length > WARN_LIST_MAX
+          ? `, …and ${unresolvedEntries.length - WARN_LIST_MAX} more` : '';
+        core.warning(`digest-cooldown: #${pr.number}: ${unresolvedEntries.length} ref(s) are pinned in a split form whose image name is not in the diff (${shown}${more}); skip-registries cannot be applied, gating them as external`);
+      }
       if (Object.keys(gated).length === 0) {
         // No external digest to gate. When this status is wired as a
         // branch-protection *required* check it must be reported on
@@ -1027,7 +1529,7 @@ export async function run({ github, context, core }) {
       // コメントの注記行は「実際に効いているバイパス」だけ（bypassEffective）。
       // 前提 status を満たさず不適用の label を「バイパス中」と描くと監査で誤読される。
       const body = renderComment(newState, gated, COOLDOWN_DAYS, NOW, strategy,
-        bypassEffective ? bypassLabel : null);
+        bypassEffective ? bypassLabel : null, Object.keys(unresolved));
       if (cid === null || !sameBody(prevBody, body)) {
         // Isolate the comment upsert: a comment-API failure (rate limit, a
         // giant PR-controlled body, transient 5xx) must not skip setStatus

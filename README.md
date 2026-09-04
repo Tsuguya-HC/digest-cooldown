@@ -74,6 +74,48 @@ See [`action.yml`](action.yml) for the full contract. The ones that matter most:
 | `bypass-label` | *(empty)* | emergency override label |
 | `bypass-requires-status` | *(empty)* | a status that must be `success` before the label counts |
 
+### Refs split across fields
+
+A ref is normally one string (`ghcr.io/acme/app:v1@sha256:…`), but some formats
+spell it across sibling fields and only the tag field carries the digest:
+
+```yaml
+images:                                   # kustomize
+  - name: controller
+    newName: registry.example.com/tools/app
+    newTag: latest@sha256:…
+image:                                    # Helm values
+  repository: registry.example.com/tools/app
+  tag: v1@sha256:…
+```
+
+The digest line alone reads as the image `latest` — no registry, so
+`skip-registries` could never match it. The action reassembles the name from the
+name-bearing sibling (`newName`/`repository` only — *not* `name`/`image`,
+which merely get overwritten by `newName`/`repository` when both are present
+and so cannot be trusted alone) in the same mapping block, bounded by
+indentation, list-item starts and the diff hunk, matched against a REF
+occurrence that lies entirely within the tag scalar's own value (a second ref
+hiding in a trailing YAML comment on the same line is left alone), and matches
+`skip-registries` against that.
+
+When the name-bearing sibling is not in the diff, or the block also carries a
+separate `registry:` field (Bitnami-style `registry`/`repository`/`tag`), the
+registry is undecidable — `registry` is deliberately never concatenated onto
+`repository` to synthesise a name, since a chart that does not actually read
+`.registry` would let that combination smuggle a ref past `skip-registries`
+under a name nothing ever pulls. Such a ref is still gated (fail-closed) but is
+called out as its own line in the PR comment and as a warning in the log, so
+"trusted but gated anyway" never looks like "external".
+
+This split-ref reassembly is local to this action's own gate: verify-image-provenance
+(a sister action sharing the `skip-registries` matcher) does not resolve a ref
+split across fields, so on that shape its policy table is keyed by the bare tag
+token instead of the reassembled name, and a `skip-registries`/policy entry set
+here does not carry over there. That asymmetry falls on the fail-closed side —
+on that shape the ref there matches no policy entry at all, so verification is
+treated as unregistered rather than passed — not fail-open.
+
 ## Making it a required status check
 
 With `always-report: true` the action reports on every PR against a gated base,

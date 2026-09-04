@@ -23,8 +23,20 @@ inputs:
       keeps the expansion in its name and therefore never matches a prefix --
       what actually gets pulled lives on the expanded registry, so it stays
       gated (fail-closed). verify-image-provenance imports the very same
-      matcher, so its same-named input has identical semantics. Defaults to
-      empty: nothing is trusted unless the caller says so.
+      matcher function, so the *prefix-boundary* semantics above are shared --
+      but the split-ref reassembly below is implemented only in this action;
+      verify-image-provenance does not resolve a ref split across fields, so a
+      prefix set here does not carry the same meaning there for that shape (see
+      README's "Refs split across fields"). A ref split across fields
+      (kustomize `newName`/`newTag`, Helm `image.repository`/`image.tag`) is
+      reassembled from the name-bearing sibling key (`newName`/`repository`,
+      never `name`/`image` -- see README) in the same mapping block, so a
+      prefix matches regardless of how the file spells the ref; when that
+      sibling is not in the diff, or the block also carries a separate
+      `registry:` key (the `registry`+`repository`+`tag` three-way split), the
+      registry is undecidable and the ref is gated as external *and* called out
+      in the PR comment. Defaults to empty: nothing is trusted unless the
+      caller says so.
     required: false
     default: ''
   pr-number:

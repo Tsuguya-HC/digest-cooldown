@@ -436,7 +436,7 @@ const main = async () => {
       const diff = `-FROM ${n}@${DIG_OLD}\n+FROM ${n}@${DIG_NEW}`;
       let gated;
       try {
-        gated = parseDiff(diff, false, skip);
+        gated = parseDiff(diff, false, skip).gated;
       } catch (e) {
         gated = `THREW: ${e.message}`;
       }
@@ -445,15 +445,15 @@ const main = async () => {
     }
     // digest-centric 側は Set/配列なので元から無傷（対称性の回帰固定）。
     check('4i: digest-centric mode is unaffected by a prototype-named image',
-      JSON.stringify(parseDiff(`+FROM constructor@${DIG_NEW}`, true, skip))
+      JSON.stringify(parseDiff(`+FROM constructor@${DIG_NEW}`, true, skip).gated)
       === JSON.stringify({ [DIG_NEW]: 'constructor' }));
     // 初回 pin（base に name 無し）は既定モードでは非 gate — prototype 名でも同じ。
     check('4i: prototype-named initial pin stays out of scope in default mode',
-      Object.keys(parseDiff(`+FROM constructor@${DIG_NEW}`, false, skip)).length === 0);
+      Object.keys(parseDiff(`+FROM constructor@${DIG_NEW}`, false, skip).gated).length === 0);
     // `__proto__` 自体は vector ではない: REF は name の先頭に `[A-Za-z0-9]` を要求するので
     // 先頭のアンダースコアが落ち、キーは `proto__`（通常の文字列）になる。
     check('4i: a leading-underscore name cannot reach __proto__ (REF anchors on alnum)',
-      JSON.stringify(parseDiff(`-FROM __proto__@${DIG_OLD}\n+FROM __proto__@${DIG_NEW}`, false, skip))
+      JSON.stringify(parseDiff(`-FROM __proto__@${DIG_OLD}\n+FROM __proto__@${DIG_NEW}`, false, skip).gated)
       === JSON.stringify({ [DIG_NEW]: 'proto__' }));
     // end-to-end: status が実際に投稿される（旧実装は statuses=[] / warnings に例外）。
     const c = await run({
@@ -485,12 +485,12 @@ const main = async () => {
     const okDiff = `-FROM ${padName}:1@${DIG_OLD}\n+FROM ${padName}:1@${DIG_NEW}`;
     check('4j: a sub-cap line is unaffected',
       okDiff.split('\n').every((l) => l.length < MAX_SCAN_LINE)
-      && JSON.stringify(parseDiff(okDiff, false, skip)) === JSON.stringify({ [DIG_NEW]: `${padName}:1` }));
+      && JSON.stringify(parseDiff(okDiff, false, skip).gated) === JSON.stringify({ [DIG_NEW]: `${padName}:1` }));
     // `@sha256:` を含まない行は長さに関係なく素通り（既存 4e の事前フィルタは維持）。
     check('4j: a long line without @sha256: is not capped',
       JSON.stringify(parseDiff(
         `+# ${'x'.repeat(100000)}\n-FROM node:20@${DIG_OLD}\n+FROM node:20@${DIG_NEW}`, false, skip,
-      )) === JSON.stringify({ [DIG_NEW]: 'node:20' }));
+      ).gated) === JSON.stringify({ [DIG_NEW]: 'node:20' }));
     // end-to-end: キャップ超過 → per-PR catch が fail-closed で pending を投稿する。
     const c = await run({
       diff: ['--- a/Dockerfile', '+++ b/Dockerfile', nearMiss].join('\n'),
@@ -1938,25 +1938,25 @@ const main = async () => {
 
     // 既定モード(false): 同一 image:tag の digest 変化のみ gate
     check('unit/default: pure digest bump gated',
-      JSON.stringify(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.0@${D2}`, false, skip)) === JSON.stringify({ [D2]: 'app:1.0' }));
+      JSON.stringify(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.0@${D2}`, false, skip).gated) === JSON.stringify({ [D2]: 'app:1.0' }));
     check('unit/default: tag bump not gated',
-      Object.keys(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.1@${D2}`, false, skip)).length === 0);
+      Object.keys(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.1@${D2}`, false, skip).gated).length === 0);
     check('unit/default: skip-listed not gated',
-      Object.keys(parseDiff(`-i: ghcr.io/animalife/x:1@${D1}\n+i: ghcr.io/animalife/x:1@${D2}`, false, skip)).length === 0);
+      Object.keys(parseDiff(`-i: ghcr.io/animalife/x:1@${D1}\n+i: ghcr.io/animalife/x:1@${D2}`, false, skip).gated).length === 0);
     // #6 回帰: 除去行が `--` で始まり `---i: ...` にレンダリングされても、default
     // は文字列一致ではなく hunk 構造で判定するため header と誤認しない。
     check('unit/default: pure digest bump gated even when the removed line renders as `---...`',
-      JSON.stringify(parseDiff(`---i: app:1.0@${D1}\n+i: app:1.0@${D2}`, false, skip)) === JSON.stringify({ [D2]: 'app:1.0' }));
+      JSON.stringify(parseDiff(`---i: app:1.0@${D1}\n+i: app:1.0@${D2}`, false, skip).gated) === JSON.stringify({ [D2]: 'app:1.0' }));
 
     // opt-in(true): base に無い新規 digest を tag 非依存で gate
     check('unit/opt: version bump (new digest) gated',
-      JSON.stringify(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.1@${D2}`, true, skip)) === JSON.stringify({ [D2]: 'app:1.1' }));
+      JSON.stringify(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.1@${D2}`, true, skip).gated) === JSON.stringify({ [D2]: 'app:1.1' }));
     check('unit/opt: re-pin to a base digest not gated',
-      Object.keys(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.1@${D1}`, true, skip)).length === 0);
+      Object.keys(parseDiff(`-i: app:1.0@${D1}\n+i: app:1.1@${D1}`, true, skip).gated).length === 0);
     check('unit/opt: metadata filename @digest does not forge base exemption',
-      JSON.stringify(parseDiff(`diff --git a/x@${D2} b/x@${D2}\n@@ -1 +1 @@\n+i: app:1.0@${D2}`, true, skip)) === JSON.stringify({ [D2]: 'app:1.0' }));
+      JSON.stringify(parseDiff(`diff --git a/x@${D2} b/x@${D2}\n@@ -1 +1 @@\n+i: app:1.0@${D2}`, true, skip).gated) === JSON.stringify({ [D2]: 'app:1.0' }));
     check('unit/opt: skip-listed not gated',
-      Object.keys(parseDiff(`+i: ghcr.io/animalife/x:1@${D2}`, true, skip)).length === 0);
+      Object.keys(parseDiff(`+i: ghcr.io/animalife/x:1@${D2}`, true, skip).gated).length === 0);
 
     // #1 回帰: hunk 内の `+++ ` 実コンテンツ行は added として拾い、hunk 外の
     // `--- `/`+++ ` ヘッダ行（digest を騙ったものでも）は base に混入しない。
@@ -1964,7 +1964,7 @@ const main = async () => {
       JSON.stringify(parseDiff(
         `diff --git a/x b/x\n--- a/x@${D2}\n+++ b/x\n@@ -1 +1 @@\n+++ i: app:1.0@${D2}`,
         true, skip,
-      )) === JSON.stringify({ [D2]: 'app:1.0' }));
+      ).gated) === JSON.stringify({ [D2]: 'app:1.0' }));
 
     // #2 回帰: context 行（先頭スペース）にのみ出現する digest は base 扱いで、
     // それ自体は gate されず、同居する新規 digest だけが gate される。
@@ -1974,13 +1974,13 @@ const main = async () => {
         JSON.stringify(parseDiff(
           `diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n i: sidecar@${D1}\n-i: app:1.0@${D2}\n+i: app:2.0@${D3}`,
           true, skip,
-        )) === JSON.stringify({ [D3]: 'app:2.0' }));
+        ).gated) === JSON.stringify({ [D3]: 'app:2.0' }));
     }
     check('unit/opt: re-pin to a context-only base digest is not gated',
       Object.keys(parseDiff(
         `diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n i: sidecar@${D2}\n-i: app:1.0@${D1}\n+i: app:1.0@${D2}`,
         true, skip,
-      )).length === 0);
+      ).gated).length === 0);
 
     // #1 base-trust 非対称ガードの回帰: base 側(`-`)に skip-listed ref、added
     // 側(`+`)に *非skip* ref で同一 digest D を持つとき、skip 経由の digest は
@@ -1993,7 +1993,7 @@ const main = async () => {
         JSON.stringify(parseDiff(
           `diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-image: ghcr.io/animalife/x@${D}\n+image: external/y@${D}`,
           true, skip,
-        )) === JSON.stringify({ [D]: 'external/y' }));
+        ).gated) === JSON.stringify({ [D]: 'external/y' }));
       // 対比: base 側が *非skip* ref なら、その digest は投入時に gate 済みとして
       // 信頼され、同一 digest への付け替えは免除される（base-trust が正常に働く）。
       // つまり上の skip ガードが無ければ skip-listed base も同様に免除してしまう、
@@ -2002,7 +2002,7 @@ const main = async () => {
         Object.keys(parseDiff(
           `diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-image: trusted/z@${D}\n+image: external/y@${D}`,
           true, skip,
-        )).length === 0);
+        ).gated).length === 0);
     }
 
     // #5 同一 digest × 複数 image 名(digest-centric): 同一 digest D を持つ 2 つの
@@ -2015,7 +2015,7 @@ const main = async () => {
         JSON.stringify(parseDiff(
           `diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1,2 @@\n+image: svc-a@${D}\n+image: svc-b@${D}`,
           true, skip,
-        )) === JSON.stringify({ [D]: 'svc-b' }));
+        ).gated) === JSON.stringify({ [D]: 'svc-b' }));
     }
 
     // #4 byte 等価の golden 固定(git 非依存): 既定モード(false)の中核主張「旧実装と
@@ -2061,7 +2061,7 @@ const main = async () => {
       ];
       for (const g of golden) {
         check(`unit/default/golden: ${g.name}`,
-          JSON.stringify(parseDiff(g.diff, false, skip)) === JSON.stringify(g.expect));
+          JSON.stringify(parseDiff(g.diff, false, skip).gated) === JSON.stringify(g.expect));
       }
     }
 
@@ -2071,15 +2071,15 @@ const main = async () => {
     check('unit/default/#11: trailing re-list of the old digest does not mask the new bump',
       JSON.stringify(parseDiff(
         `-i: app:1.0@${D1}\n+i: app:1.0@${D2}\n+i: app:1.0@${D1}`, false, skip,
-      )) === JSON.stringify({ [D2]: 'app:1.0' }));
+      ).gated) === JSON.stringify({ [D2]: 'app:1.0' }));
     // #19 default multiplicity: 本物の bump + reformat の重複でも新 digest だけ gate。
     check('unit/default/#19: reformatted duplicate of the old ref does not mask the new bump',
       JSON.stringify(parseDiff(
         `-i: node:20@${D1}\n+i: node:20@${D2}\n-i: node:20@${D1}\n+i: node:20@${D1}`, false, skip,
-      )) === JSON.stringify({ [D2]: 'node:20' }));
+      ).gated) === JSON.stringify({ [D2]: 'node:20' }));
     // 初回 pin（base に tag 無し）は既定モードでは非 gate（native 領分）。Set 化後も維持。
     check('unit/default: initial pin (tag absent from base) not gated',
-      Object.keys(parseDiff(`+i: app:1.0@${D2}`, false, skip)).length === 0);
+      Object.keys(parseDiff(`+i: app:1.0@${D2}`, false, skip).gated).length === 0);
 
     // #1 反例(⊇ 撤回): in-scope でも「opt-in の方が gate が減る」ことを既知挙動として固定する。
     // base に既存の digest D2（別 image の context 行に実在）への付け替え（同一 tag で D1→D2）は、
@@ -2096,9 +2096,9 @@ const main = async () => {
         `+i: app:1.0@${D2}`,         // 同一 tag で D1->D2 の付け替え
       ].join('\n');
       check('unit/#1-counterexample: default gates the re-pin to a base digest (pure bump)',
-        JSON.stringify(parseDiff(ctxDiff, false, skip)) === JSON.stringify({ [D2]: 'app:1.0' }));
+        JSON.stringify(parseDiff(ctxDiff, false, skip).gated) === JSON.stringify({ [D2]: 'app:1.0' }));
       check('unit/#1-counterexample: opt-in does NOT gate it — opt-in can gate LESS than default',
-        Object.keys(parseDiff(ctxDiff, true, skip)).length === 0);
+        Object.keys(parseDiff(ctxDiff, true, skip).gated).length === 0);
     }
   }
 
@@ -2214,6 +2214,497 @@ const main = async () => {
     threw = false;
     try { assertKnownDigestAlgos(`x@${'z'.repeat(4096)}`); } catch { threw = true; }
     check('unit/assertKnownDigestAlgos: a long non-digest line is scanned without throwing', threw === false);
+  }
+
+  // --- home fork: 1 行に収まっていない ref（分割形式）の名前解決 -------------
+  //
+  // issue #21: kustomize の `images:` や Helm values の `image.repository`/`tag` は
+  // ref の構成要素を複数フィールドに分けるので、digest が載る行に registry が無い。
+  // 従来はその行から抽出される name が **tag**（`latest`）になり、skip-registries が
+  // 一致しようがなかった＝設定に書いた意味が消えていた。ここでは「同じマッピング
+  // ブロックの名前キーから解決される」ことと、**解決の境界**（別項目・別ブロック・
+  // 別 hunk・別ファイル・`${...}` 展開）を越えないことの両方を固定する。
+  // 境界が緩むと、skip 側に倒れる = 冷却ゲートを素通りする fail-open になる。
+  {
+    const skip = (n) => n === 'registry.infra.tgy.io' || n.startsWith('registry.infra.tgy.io/');
+    const D1 = 'sha256:' + 'a'.repeat(64);
+    const D2 = 'sha256:' + 'b'.repeat(64);
+    const D3 = 'sha256:' + 'c'.repeat(64);
+    const D6 = 'sha256:' + 'f'.repeat(64);
+    const gate = (diff, dc) => parseDiff(diff, dc, skip).gated;
+    const notes = (diff, dc) => {
+      const { unresolved } = parseDiff(diff, dc, skip);
+      return Object.entries(unresolved).map(([dig, token]) => `${token}@${dig}`);
+    };
+
+    // 実物（home-cluster kustomize/taskflow/kustomization.yaml）の形。
+    const kustomize = `diff --git a/k.yaml b/k.yaml
+--- a/k.yaml
++++ b/k.yaml
+@@ -37,4 +37,4 @@ resources:
+ images:
+   - name: controller
+     newName: registry.infra.tgy.io/tools/taskflow
+-    newTag: latest@${D1}
++    newTag: latest@${D2}`;
+    for (const dc of [false, true]) {
+      check(`unit/split: kustomize newName supplies the registry (digestCentric=${dc})`,
+        Object.keys(gate(kustomize, dc)).length === 0);
+    }
+    // Helm values 形式。名前キーが tag の前でも後ろでも同じブロックなら解決する。
+    check('unit/split: helm repository before tag',
+      Object.keys(gate(`@@ -1 +1 @@\n image:\n   repository: registry.infra.tgy.io/tools/x\n-  tag: v1@${D1}\n+  tag: v2@${D2}`, true)).length === 0);
+    check('unit/split: helm repository after tag',
+      Object.keys(gate(`@@ -1 +1 @@\n image:\n-  tag: v1@${D1}\n+  tag: v2@${D2}\n   repository: registry.infra.tgy.io/tools/x`, true)).length === 0);
+    // 解決しても skip でなければ gate は残る。表示名も tag ではなく解決後の名前。
+    check('unit/split: an external split ref is still gated, under its resolved name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   repository: ghcr.io/other/x\n+  tag: v2@${D2}`, true))
+        === JSON.stringify({ [D2]: 'ghcr.io/other/x' }));
+
+    // --- 解決の境界（ここが緩むと skip 側に倒れて fail-open） ---
+    // リスト項目をまたがない: 2 つ目の項目には newName が無く、`name` 単独では
+    // 解決しない（B: weak キー撤去）ので、1 つ目の newName を拾うことも、`name` の
+    // 値（`b`）で解決することもなく unresolved のまま raw トークンで gate される。
+    check('unit/split: a sibling list item does not inherit the previous item name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n images:\n   - name: a\n     newName: registry.infra.tgy.io/tools/a\n     newTag: latest@${D1}\n   - name: b\n+    newTag: latest@${D3}`, true))
+        === JSON.stringify({ [D3]: 'latest' }));
+    check('unit/split: ...and is reported unresolved rather than silently resolved to `name`',
+      JSON.stringify(notes(`@@ -1 +1 @@\n images:\n   - name: a\n     newName: registry.infra.tgy.io/tools/a\n     newTag: latest@${D1}\n   - name: b\n+    newTag: latest@${D3}`, true))
+        === JSON.stringify([`latest@${D3}`]));
+    // インデントが浅くなったら別ブロック。
+    check('unit/split: a dedent ends the block',
+      JSON.stringify(gate(`@@ -1 +1 @@\n a:\n   repository: registry.infra.tgy.io/tools/a\n   tag: v1@${D1}\n b:\n+  tag: v2@${D2}`, true))
+        === JSON.stringify({ [D2]: 'v2' }));
+    // hunk / ファイルをまたがない（hunk 内でしか「行が原ファイル上でも連続」が
+    // 保証されず、ブロックの切れ目が diff に現れる保証も無いため）。
+    check('unit/split: no association across hunks',
+      JSON.stringify(gate(`@@ -1 +1 @@\n   repository: registry.infra.tgy.io/tools/a\n@@ -9 +9 @@\n+  tag: v2@${D2}`, true))
+        === JSON.stringify({ [D2]: 'v2' }));
+    check('unit/split: no association across files',
+      JSON.stringify(gate(`diff --git a/x b/x\n@@ -1 +1 @@\n   repository: registry.infra.tgy.io/tools/a\ndiff --git a/y b/y\n@@ -1 +1 @@\n+  tag: v2@${D2}`, true))
+        === JSON.stringify({ [D2]: 'v2' }));
+    // `${...}` 展開を吸収した名前は差し替えない（吸収は skip 密輸を塞ぐための
+    // fail-closed 設計そのもの。ここで兄弟キーの名前に置き換えると穴が再開通する）。
+    check('unit/split: a ${...}-absorbed name is never replaced by a sibling name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n   repository: registry.infra.tgy.io/tools/a\n+  tag: \${MIRROR}latest@${D2}`, true))
+        === JSON.stringify({ [D2]: '${MIRROR}latest' }));
+    // 名前キー側に `${...}` があるときも採用しない（判定不能として gate に残す）。
+    check('unit/split: a ${...} in the name field is not accepted as a name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n   repository: \${REG}/tools/a\n+  tag: latest@${D2}`, true))
+        === JSON.stringify({ [D2]: 'latest' }));
+    // tag キーでも、値が `/` を含む完全な ref ならそのまま扱う（差し替えない）。
+    check('unit/split: a full ref on a tag key keeps its own name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n   repository: registry.infra.tgy.io/tools/a\n+  tag: ghcr.io/other/x@${D2}`, true))
+        === JSON.stringify({ [D2]: 'ghcr.io/other/x' }));
+    // newName が name に勝つ（実際に pull されるのは newName 側）。
+    check('unit/split: newName wins over name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n   - name: registry.infra.tgy.io/tools/a\n+    newTag: v2@${D2}\n     newName: ghcr.io/other/x`, true))
+        === JSON.stringify({ [D2]: 'ghcr.io/other/x' }));
+    // base 側の分割形式も同じ解決を通す。skip-listed な base ref は base-trust に
+    // 漏らさない（既存の非対称ガードと同じ理由）ので、同一 digest の非 skip 新規
+    // ref は gate される。
+    check('unit/split: a skip-listed split base ref does not seed base trust',
+      JSON.stringify(gate(`@@ -1 +1 @@\n a:\n   newName: registry.infra.tgy.io/tools/a\n-  newTag: v1@${D1}\n+FROM ghcr.io/other/x@${D1}`, true))
+        === JSON.stringify({ [D1]: 'ghcr.io/other/x' }));
+
+    // --- 判定不能の可視化（黙って「外部イメージ」にしない） ---
+    check('unit/split: an unresolved split ref is reported (digest-centric)',
+      JSON.stringify(notes(`@@ -1 +1 @@\n+  tag: v2@${D2}`, true)) === JSON.stringify([`v2@${D2}`]));
+    check('unit/split: an unresolved split ref is reported (pure-bump)',
+      JSON.stringify(notes(`@@ -1 +1 @@\n-  tag: v1@${D1}\n+  tag: v1@${D2}`, false)) === JSON.stringify([`v1@${D2}`]));
+    check('unit/split: a resolved ref is not reported',
+      notes(kustomize, true).length === 0);
+    // 報告するのは **gate すると決まった** digest だけ。走査時点で報告すると、
+    // base と同一 digest で結局 gate されない ref まで警告に載る。
+    check('unit/split: a non-gated unresolved ref is not reported',
+      notes(`@@ -1 +1 @@\n-  tag: v1@${D1}\n+  tag: v2@${D1}`, true).length === 0);
+
+    // 未踏経路の回帰: 後方パス（名前キーが tag より後ろ）× リスト項目境界 × base 側
+    // （`-` 行）。item a / item b はいずれも newName が自分の tag より後ろにあるので
+    // 後方パスでしか解決できない。item b が誤って item a の（skip-listed な）newName
+    // を引き継ぐと、item b の base digest が skip 扱いになって base-trust の対象外に
+    // 落ち（isSkip ガード）、同じ digest を非 skip 名で再導入する `+` 行が gate されて
+    // しまう。正しく境界が効いていれば item b は自分の（非 skip な）newName に解決され、
+    // base-trust が効いて gate されない。
+    check('unit/split: backward pass respects list-item boundaries on the base (`-`) side',
+      (() => {
+        const D5 = 'sha256:' + 'e'.repeat(64);
+        const diff = [
+          ' images:',
+          '   - name: a',
+          `-    tag: v1@${D1}`,
+          '     newName: registry.infra.tgy.io/tools/a',
+          '   - name: b',
+          `-    tag: v1@${D5}`,
+          '     newName: ghcr.io/other/y',
+          ' other:',
+          `+  image: svc-new@${D5}`,
+        ].join('\n');
+        return Object.keys(gate(diff, true)).length === 0;
+      })());
+
+    // --- Round 1 レビュー回帰（A〜E） ---
+
+    // A: tag スカラーの値レンジに完全に収まらない REF マッチは差し替え対象にしない。
+    // 行末コメントに紛れ込んだ 2 本目の ref（`evilimage`）は tag 自身の値
+    // （`v2@D2`）の外にあるので、素の raw 名のまま扱われる = skip 密輸できず gate
+    // される。tag スカラー自身（`v2@D2`）は newName 経由で skip-listed に解決され、
+    // gated には現れない。
+    check('unit/split (A): a ref hidden in a tag line\'s trailing comment is not absorbed into the sibling name',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${D1}\n+  tag: v2@${D2}  # rollback: evilimage@${D3}`, true))
+        === JSON.stringify({ [D3]: 'evilimage' }));
+
+    // B: `newName` / `repository` が同じブロックに全く無い `- name: <skip 対象>` は
+    // 解決不能。skip 対象の値であっても採用しない（採用すると skip 側に倒れる
+    // fail-open に戻る）ので gate され、かつ判定不能として報告される。
+    check('unit/split (B): `- name:` alone (no newName in the diff) does not resolve, even when the name looks skip-listed',
+      JSON.stringify(gate(`@@ -1 +1 @@\n images:\n   - name: registry.infra.tgy.io/tools/app\n+    newTag: latest@${D2}`, true))
+        === JSON.stringify({ [D2]: 'latest' }));
+    check('unit/split (B): ...and is reported unresolved',
+      JSON.stringify(notes(`@@ -1 +1 @@\n images:\n   - name: registry.infra.tgy.io/tools/app\n+    newTag: latest@${D2}`, true))
+        === JSON.stringify([`latest@${D2}`]));
+
+    // C: `registry:` + `repository:` + `tag:` の 3 分割は `repository` 単独では
+    // 解決しない。`registry + '/' + repository` を合成すると、chart が実際には
+    // `.registry` を読まない場合に密輸経路になる（本文コメント参照）ので、
+    // 判定不能として gate + 報告する。
+    check('unit/split (C): registry + repository + tag does not resolve repository alone',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   registry: registry.infra.tgy.io\n   repository: tools/app\n+  tag: v2@${D2}`, true))
+        === JSON.stringify({ [D2]: 'v2' }));
+    check('unit/split (C): ...and is reported unresolved',
+      JSON.stringify(notes(`@@ -1 +1 @@\n image:\n   registry: registry.infra.tgy.io\n   repository: tools/app\n+  tag: v2@${D2}`, true))
+        === JSON.stringify([`v2@${D2}`]));
+
+    // C 回帰（Round 2）: `repository:` / `registry:` が tag 行を挟んで **反対側**に
+    // あっても無効化が効くこと。invalidated をパス内で確定させてから OR すると、
+    // forward は registry を、backward は repository を、互いに見ないまま false
+    // 固定になり、skip-registries に一致する repository がそのまま信頼される
+    // fail-open になっていた（gated={} / unresolved={} という無音の抜け）。
+    // pure-bump は `-`/`+` 両方に同じ tag（`v1`）を置き、初回 pin 扱いで
+    // gate 判定自体がスキップされないようにする。
+    check('unit/split (C, direction A): repository before tag, registry after -> still gate + unresolved (pure-bump)',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   repository: registry.infra.tgy.io/tools/app\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   registry: evil.example.com`, false))
+        === JSON.stringify({ [D6]: 'v1' })
+      && JSON.stringify(notes(`@@ -1 +1 @@\n image:\n   repository: registry.infra.tgy.io/tools/app\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   registry: evil.example.com`, false))
+        === JSON.stringify([`v1@${D6}`]));
+    check('unit/split (C, direction A): ...same shape, digest-centric',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   repository: registry.infra.tgy.io/tools/app\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   registry: evil.example.com`, true))
+        === JSON.stringify({ [D6]: 'v1' })
+      && JSON.stringify(notes(`@@ -1 +1 @@\n image:\n   repository: registry.infra.tgy.io/tools/app\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   registry: evil.example.com`, true))
+        === JSON.stringify([`v1@${D6}`]));
+    check('unit/split (C, direction B): registry before tag, repository after -> still gate + unresolved (pure-bump)',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   registry: evil.example.com\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   repository: registry.infra.tgy.io/tools/app`, false))
+        === JSON.stringify({ [D6]: 'v1' })
+      && JSON.stringify(notes(`@@ -1 +1 @@\n image:\n   registry: evil.example.com\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   repository: registry.infra.tgy.io/tools/app`, false))
+        === JSON.stringify([`v1@${D6}`]));
+    check('unit/split (C, direction B): ...same shape, digest-centric',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   registry: evil.example.com\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   repository: registry.infra.tgy.io/tools/app`, true))
+        === JSON.stringify({ [D6]: 'v1' })
+      && JSON.stringify(notes(`@@ -1 +1 @@\n image:\n   registry: evil.example.com\n-  tag: v1@${D1}\n+  tag: v1@${D6}\n   repository: registry.infra.tgy.io/tools/app`, true))
+        === JSON.stringify([`v1@${D6}`]));
+
+    // C（リスト項目境界）: `images:` の `- ` ブロックの中で registry 無効化が働くこと、
+    // かつ隣接項目へ漏れないこと。1 項目目は registry 無し（解決）、2 項目目は
+    // registry 有り（無効化）。
+    {
+      const D7 = 'sha256:' + '0'.repeat(64);
+      const listItems = [
+        '@@ -1 +1 @@',
+        ' images:',
+        '   - repository: registry.infra.tgy.io/tools/ok',
+        `+    tag: v1@${D2}`,
+        '   - registry: evil.example.com',
+        '     repository: registry.infra.tgy.io/tools/ok2',
+        `+    tag: v2@${D7}`,
+      ].join('\n');
+      check('unit/split (C, list item): the first item (no registry:) resolves and is skip-listed -> not gated',
+        gate(listItems, true)[D2] === undefined);
+      check('unit/split (C, list item): the second item (registry: present) is invalidated -> gate + unresolved',
+        JSON.stringify(gate(listItems, true)) === JSON.stringify({ [D7]: 'v2' })
+          && JSON.stringify(notes(listItems, true)) === JSON.stringify([`v2@${D7}`]));
+    }
+
+    // D: pure-bump（既定モード）の bump 同一性判定（キー）は raw tag トークン
+    // （main と同じ土俵、Round 2 で解決名混入をやめた）なので、split 形式でも
+    // タグが変わるバージョン bump は gate されない（digest-centric の契約を
+    // pure-bump へ黙って広げない）。同じ tag のままの digest bump は従来どおり
+    // gate される（表示名は skip 判定に使う解決名）。
+    check('unit/split (D): a split-form version bump is NOT gated in pure-bump mode',
+      Object.keys(gate(`@@ -1 +1 @@\n image:\n   repository: ghcr.io/other/x\n-  tag: v1@${D1}\n+  tag: v2@${D2}`, false)).length === 0);
+    check('unit/split (D): a split-form digest-only bump (same tag) IS gated in pure-bump mode',
+      JSON.stringify(gate(`@@ -1 +1 @@\n image:\n   repository: ghcr.io/other/x\n-  tag: v1@${D1}\n+  tag: v1@${D3}`, false))
+        === JSON.stringify({ [D3]: 'ghcr.io/other/x' }));
+
+    // E: 同一 digest が「解決済み」ブロックと「未解決」ブロックの両方から新規導入
+    // されるとき、gated[] と unresolved[] は必ず同じ（後勝ちの）エントリを反映する
+    // — 出現順をどちらにしても、表の名前と footer の注記が食い違わない。
+    {
+      const D4 = 'sha256:' + 'd'.repeat(64);
+      const unresolvedLast = `@@ -1 +1 @@\n a:\n   newName: ghcr.io/other/x\n+  newTag: latest@${D4}\n b:\n+  tag: latest@${D4}`;
+      check('unit/split (E): unresolved wins last -> gated name and unresolved note agree',
+        JSON.stringify(gate(unresolvedLast, true)) === JSON.stringify({ [D4]: 'latest' })
+          && JSON.stringify(notes(unresolvedLast, true)) === JSON.stringify([`latest@${D4}`]));
+      const resolvedLast = `@@ -1 +1 @@\n b:\n+  tag: latest@${D4}\n a:\n   newName: ghcr.io/other/x\n+  newTag: latest@${D4}`;
+      check('unit/split (E): resolved wins last -> gated name is clean and unresolved carries no stale note',
+        JSON.stringify(gate(resolvedLast, true)) === JSON.stringify({ [D4]: 'ghcr.io/other/x' })
+          && notes(resolvedLast, true).length === 0);
+    }
+
+    // E（pure-bump 版）: digest-centric だけでなく既定モードでも、同じ raw tag
+    // トークンを共有する「解決済み」ブロックと「未解決」ブロックの両方から同一
+    // digest が新規導入されるとき、gated[] と unresolved[] は同じ（後勝ちの）
+    // 出現を反映すること。pure-bump は既定モード（gate-authors スコープ外の全 PR
+    // が通る）で digest-centric より高頻度に踏まれる経路なので、ここが未テストだと
+    // pure-bump 側だけの一貫性回帰を検出できない。値は現行実装（raw tag トークンを
+    // キーにする Round 2 の修正後）で実測し直したもの — 一致の主張そのもの
+    // （unresolved に載る token は必ず gated の表示名と一致する／resolved 側が
+    // 勝ったときは unresolved に何も残らない）も合わせて固定する。
+    {
+      const H1 = 'sha256:' + '1'.repeat(64);
+      const H2 = 'sha256:' + '2'.repeat(64);
+      const H = 'sha256:' + '9'.repeat(64);
+      const unresolvedLastPB = `@@ -1 +1 @@\n a:\n   repository: ghcr.io/other/x\n-  tag: v1@${H1}\n+  tag: v1@${H}\n b:\n-  tag: v1@${H2}\n+  tag: v1@${H}`;
+      const gatedUL = gate(unresolvedLastPB, false);
+      const notesUL = notes(unresolvedLastPB, false);
+      check('unit/split (E, pure-bump): unresolved wins last -> gated name and unresolved note agree',
+        JSON.stringify(gatedUL) === JSON.stringify({ [H]: 'v1' })
+          && JSON.stringify(notesUL) === JSON.stringify([`v1@${H}`])
+          // 一致そのものの主張: 各 unresolved エントリの digest について、
+          // その token は gated の表示名と食い違わない。
+          && notesUL.every((entry) => {
+            const at = entry.lastIndexOf('@');
+            return gatedUL[entry.slice(at + 1)] === entry.slice(0, at);
+          }));
+      const resolvedLastPB = `@@ -1 +1 @@\n b:\n-  tag: v1@${H2}\n+  tag: v1@${H}\n a:\n   repository: ghcr.io/other/x\n-  tag: v1@${H1}\n+  tag: v1@${H}`;
+      check('unit/split (E, pure-bump): resolved wins last -> gated name is clean and unresolved carries no stale note',
+        JSON.stringify(gate(resolvedLastPB, false)) === JSON.stringify({ [H]: 'ghcr.io/other/x' })
+          && notes(resolvedLastPB, false).length === 0);
+    }
+
+    // --- Round 2 レビュー回帰 ---
+
+    // A（強化）: 内包判定ではなく**完全一致**。tag スカラーの値に余剰トークンが
+    // あれば（タブ + `#`、カンマ区切り、引用符内の 2 本目、スペース区切り）、
+    // 兄弟ブロックの信頼名（skip-listed）に吸収されず、両方の ref が raw のまま
+    // 通常の ref として扱われて gate される。内包判定だとこれらは全部
+    // `{gated:{}, unresolved:{}}`（skip-listed に丸ごと吸収）に潰れていた。
+    {
+      const E1 = 'sha256:' + '1'.repeat(64);
+      const E2 = 'sha256:' + '2'.repeat(64);
+      const E3 = 'sha256:' + '3'.repeat(64);
+      const base = `@@ -1 +1 @@\n image:\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${E1}\n+  tag: `;
+      check('unit/split (A, exact match): tab + `#` before a second ref -> gated, not absorbed',
+        gate(`${base}v1@${E2}\t#evil@${E3}`, true)[E3] !== undefined);
+      check('unit/split (A, exact match): comma-separated second ref -> gated, not absorbed',
+        gate(`${base}v1@${E2},evil@${E3}`, true)[E3] !== undefined);
+      check('unit/split (A, exact match): a second ref inside the quoted scalar -> gated, not absorbed',
+        gate(`${base}"v1@${E2} evil@${E3}"`, true)[E3] !== undefined);
+      // 正常形は従来どおり解決される（完全一致でも壊れないことの固定）。
+      const normal = `@@ -1 +1 @@\n image:\n   newName: registry.infra.tgy.io/tools/app\n-  newTag: latest@${E1}\n+  newTag: latest@${E2}`;
+      check('unit/split (A, exact match): a normal single-ref scalar still resolves via the sibling name',
+        Object.keys(gate(normal, true)).length === 0);
+      const normalQuoted = `@@ -1 +1 @@\n image:\n   newName: registry.infra.tgy.io/tools/app\n-  newTag: "latest@${E1}"\n+  newTag: "latest@${E2}"`;
+      check('unit/split (A, exact match): a normal quoted single-ref scalar still resolves via the sibling name',
+        Object.keys(gate(normalQuoted, true)).length === 0);
+    }
+
+    // D（差し替え）: pure-bump の bump 同一性判定（キー）は解決状態から独立した
+    // raw tag トークン。名前行の削除・変更・追加のいずれでも、同じ tag のままの
+    // digest bump は gate される（main と同じ土俵）。
+    {
+      const F1 = 'sha256:' + '4'.repeat(64);
+      const F2 = 'sha256:' + '5'.repeat(64);
+      check('unit/split (D, key independence): removing the name line does not un-gate a same-tag digest bump',
+        gate(`@@ -1 +1 @@\n image:\n-  repository: registry.example.com/app\n-  tag: latest@${F1}\n+  tag: latest@${F2}`, false)[F2] !== undefined);
+      check('unit/split (D, key independence): changing the name line to an unresolvable one does not un-gate it',
+        gate(`@@ -1 +1 @@\n image:\n-  repository: registry.example.com/app\n+  repository: \${REG}/app\n-  tag: latest@${F1}\n+  tag: latest@${F2}`, false)[F2] !== undefined);
+      check('unit/split (D, key independence): adding a name line where there was none does not un-gate it',
+        gate(`@@ -1 +1 @@\n image:\n+  repository: registry.example.com/app\n-  tag: latest@${F1}\n+  tag: latest@${F2}`, false)[F2] !== undefined);
+      // 同じ raw tag トークンを 2 つの無関係なブロックが使い、片方だけ skip 対象の
+      // レジストリを指すとき、非 skip 側の digest は gate される（「全部 skip の
+      // ときだけ skip」— 1 つでも非 skip があれば gate、の固定）。
+      const G1 = 'sha256:' + '6'.repeat(64);
+      const G2 = 'sha256:' + '7'.repeat(64);
+      const G = 'sha256:' + '8'.repeat(64);
+      const twoBlocks = [
+        '@@ -1 +1 @@',
+        ' a:',
+        '   repository: registry.infra.tgy.io/tools/trusted',
+        `-  tag: latest@${G1}`,
+        `+  tag: latest@${G}`,
+        ' b:',
+        '   repository: ghcr.io/other/evil',
+        `-  tag: latest@${G2}`,
+        `+  tag: latest@${G}`,
+      ].join('\n');
+      check('unit/split (D, key independence): a shared raw tag token across a trusted and an untrusted block still gates',
+        JSON.stringify(gate(twoBlocks, false)) === JSON.stringify({ [G]: 'ghcr.io/other/evil' }));
+
+      // Round 3: 表示名（`info.name`）は必ず**非 skip の出現**から採る。skip 側の
+      // 出現でも無条件に最後勝ちで上書きすると、gate 自体は正しく効くのに、PR
+      // コメントの表には gate の原因でない信頼レジストリ側の名前が出る（出現順に
+      // 依存する監査可能性の破れ）。twoBlocks（trusted が先・untrusted が後）は
+      // たまたま最後勝ちでも正解と一致するため検出できないので、逆順を固定する。
+      const twoBlocksReversed = [
+        '@@ -1 +1 @@',
+        ' a:',
+        '   repository: ghcr.io/other/evil',
+        `-  tag: latest@${G2}`,
+        `+  tag: latest@${G}`,
+        ' b:',
+        '   repository: registry.infra.tgy.io/tools/trusted',
+        `-  tag: latest@${G1}`,
+        `+  tag: latest@${G}`,
+      ].join('\n');
+      check('unit/split (D, key independence): ...still shows the untrusted (gate-causing) name even when the trusted block comes last',
+        JSON.stringify(gate(twoBlocksReversed, false)) === JSON.stringify({ [G]: 'ghcr.io/other/evil' }));
+
+      // 同じ不変条件は「未解決ブロック」側にも及ぶ: trusted ブロックが先に出現し、
+      // 解決不能なブロックが後に出現しても、表示名 / unresolved は non-skip な
+      // 未解決の出現（raw tag トークン）から採られる。
+      const G3 = 'sha256:' + '9'.repeat(64);
+      const trustedThenUnresolved = [
+        '@@ -1 +1 @@',
+        ' a:',
+        '   repository: registry.infra.tgy.io/tools/trusted',
+        `-  tag: latest@${G1}`,
+        `+  tag: latest@${G3}`,
+        ' b:',
+        `-  tag: latest@${G2}`,
+        `+  tag: latest@${G3}`,
+      ].join('\n');
+      check('unit/split (D, key independence): a trusted block sharing a tag with an unresolved block still gates + reports unresolved',
+        JSON.stringify(gate(trustedThenUnresolved, false)) === JSON.stringify({ [G3]: 'latest' })
+          && JSON.stringify(notes(trustedThenUnresolved, false)) === JSON.stringify([`latest@${G3}`]));
+    }
+
+    // --- Round 3 レビュー回帰 ---
+
+    // 1: `newName`（kustomize が読む）と `repository`（Helm が読む）が同じブロックに
+    // 両方あり、値が食い違う（＝ diff の見た目だけでは実行系がどちらを読むか
+    // 決まらない）とき、解決しない（gate + unresolved）。従来は後勝ちで
+    // どちらか片方を無条件採用していたため、無視される方のキーで実効名を
+    // 差し替えられる fail-open だった。
+    {
+      const I1 = 'sha256:' + '1'.repeat(64);
+      const I2 = 'sha256:' + '2'.repeat(64);
+      const diverge = `@@ -1 +1 @@\n image:\n   repository: ghcr.io/evil/x\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${I1}\n+  tag: v1@${I2}`;
+      check('unit/split (1, name ambiguity): repository and newName disagree -> gate + unresolved instead of trusting either',
+        JSON.stringify(gate(diverge, false)) === JSON.stringify({ [I2]: 'v1' })
+          && JSON.stringify(notes(diverge, false)) === JSON.stringify([`v1@${I2}`]));
+      // registry + repository + newName すべて同居: 名前の曖昧さと registry
+      // 無効化のどちらの経路からも解決しないこと（2 例目、同時に閉じる）。
+      const triple = `@@ -1 +1 @@\n image:\n   registry: evil.example.com\n   repository: evil/payload\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${I1}\n+  tag: v1@${I2}`;
+      check('unit/split (1, name ambiguity): registry + repository + newName together -> still gate + unresolved',
+        JSON.stringify(gate(triple, false)) === JSON.stringify({ [I2]: 'v1' })
+          && JSON.stringify(notes(triple, false)) === JSON.stringify([`v1@${I2}`]));
+      // 回帰ガード: `newName` と `repository` が**同じ値**を指すなら曖昧ではない
+      // （distinct な候補は 1 つ）ので、従来どおり解決される。
+      const agree = `@@ -1 +1 @@\n image:\n   repository: registry.infra.tgy.io/tools/app\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${I1}\n+  tag: v1@${I2}`;
+      check('unit/split (1, name ambiguity): repository and newName agreeing on the same value still resolves',
+        Object.keys(gate(agree, false)).length === 0);
+    }
+
+    // 2: CRLF 改行のリポでは KEY_LINE が一切マッチせず（JS の `.` は `\r` を除外、
+    // `$` は `/m` 無しで入力の絶対末尾にしかマッチしない）、分割形式の解決が丸ごと
+    // no-op になっていた。skip-registries が黙って効かなくなり、callout も出ない。
+    {
+      const J1 = 'sha256:' + '3'.repeat(64);
+      const J2 = 'sha256:' + '4'.repeat(64);
+      const crlf = [
+        '@@ -1 +1 @@',
+        ' image:',
+        '   newName: registry.infra.tgy.io/tools/app',
+        `-  tag: v1@${J1}`,
+        `+  tag: v1@${J2}`,
+      ].join('\r\n');
+      check('unit/split (2, CRLF): a CRLF diff still resolves the split name and honours skip-registries',
+        Object.keys(gate(crlf, false)).length === 0);
+    }
+
+    // 3: `blockNameFor` が「tag 行ではない」と「tag 行だがスパンが一致しなかった」を
+    // どちらも `undefined` に潰していたため、Round 2 の完全一致化で解決から外れた
+    // 分（YAML として正当だが `scalarValue` のコメット除去がタブ区切りを認識しない
+    // 等）が、callout なしで黙って「通常の ref」として gate されていた。今は
+    // `null`（= unresolved）を返すので gate は変わらないが可視化される。
+    {
+      const K1 = 'sha256:' + '5'.repeat(64);
+      const K2 = 'sha256:' + '6'.repeat(64);
+      const tabComment = `@@ -1 +1 @@\n image:\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${K1}\n+  tag: v1@${K2}\t# renovate`;
+      check('unit/split (3, span mismatch visibility): a tab-separated trailing comment (no hidden ref) still reports unresolved',
+        JSON.stringify(gate(tabComment, false)) === JSON.stringify({ [K2]: 'v1' })
+          && JSON.stringify(notes(tabComment, false)) === JSON.stringify([`v1@${K2}`]));
+      // 回帰ガード: 行末に何も無い正常な tag 行（Round 1 A のもともとの主張）は、
+      // これまでどおり callout なしで解決される。
+      const clean = `@@ -1 +1 @@\n image:\n   newName: registry.infra.tgy.io/tools/app\n-  tag: v1@${K1}\n+  tag: v1@${K2}`;
+      check('unit/split (3, span mismatch visibility): a clean tag line is unaffected (no spurious unresolved)',
+        Object.keys(gate(clean, false)).length === 0 && notes(clean, false).length === 0);
+    }
+
+    // 4: 分割形式では key が raw tag トークンのみ（registry を持たない）なので、
+    // 同じ diff 内の**無関係な 2 つのイメージ**が同じ tag（`latest` 等）を共有
+    // しうる。片方の正当な bump が `oldByTag` にそのキーを持ち込むと、もう片方の
+    // 初回 pin が「base に既存のキー」判定を誤って通過し、gate されてしまっていた。
+    {
+      const L1 = 'sha256:' + '7'.repeat(64);
+      const L2 = 'sha256:' + '8'.repeat(64);
+      const L3 = 'sha256:' + '9'.repeat(64);
+      const collision = [
+        '@@ -1 +1 @@',
+        ' images:',
+        '   - name: a',
+        '     newName: registry.infra.tgy.io/tools/imageA',
+        `-    newTag: latest@${L1}`,
+        `+    newTag: latest@${L2}`,
+        '   - name: b',
+        '     newName: ghcr.io/external/imageB',
+        `+    newTag: latest@${L3}`,
+      ].join('\n');
+      check('unit/split (4, initial-pin precision): an unrelated image sharing a raw tag token with a genuine bump is not gated as that bump',
+        gate(collision, false)[L3] === undefined);
+      // 単独なら初回 pin として非 gate であることの対照実験（相互作用ではなく
+      // imageB 自身の性質であることを切り分ける）。
+      const alone = [
+        '   - name: b',
+        '     newName: ghcr.io/external/imageB',
+        `+    newTag: latest@${L3}`,
+      ].join('\n');
+      check('unit/split (4, initial-pin precision): ...imageB alone is indeed an (un-gated) initial pin',
+        gate(alone, false)[L3] === undefined);
+      // sameImage の名前比較は normalizeImageName を通す（isSkipRef との対称性）。
+      // `docker.io/` 別名だけが変わる本当に同一のイメージの bump が、生文字列
+      // 比較だと「別イメージの初回 pin」に誤判定されて免除されてしまっていた。
+      const M1 = 'sha256:' + 'c'.repeat(64);
+      const M2 = 'sha256:' + 'd'.repeat(64);
+      const dockerIoAlias = `@@ -1 +1 @@\n image:\n-  repository: docker.io/bitnami/nginx\n+  repository: bitnami/nginx\n-  tag: 1.25@${M1}\n+  tag: 1.25@${M2}`;
+      check('unit/split (4, initial-pin precision): a same-tag digest bump across a docker.io/ alias is still gated',
+        JSON.stringify(gate(dockerIoAlias, false)) === JSON.stringify({ [M2]: 'bitnami/nginx' }));
+    }
+  }
+
+  // Test 21 (分割形式を run() 経由で): skip-registries が書式によらず効くこと、
+  // 判定不能は gate しつつ PR コメントとログに出ること。
+  {
+    const D1 = 'sha256:' + 'a'.repeat(64);
+    const D2 = 'sha256:' + 'b'.repeat(64);
+    let c = await run({
+      diff: `diff --git a/k.yaml b/k.yaml\n@@ -1 +1 @@\n image:\n   repository: ghcr.io/animalife/app\n-  tag: v1@${D1}\n+  tag: v1@${D2}`,
+      today: '2026-06-03',
+    });
+    check('21: a split-form ref on a skip-listed registry is not gated',
+      c.statuses.length === 0 && c.created.length === 0);
+
+    c = await run({
+      diff: `diff --git a/k.yaml b/k.yaml\n@@ -1 +1 @@\n-  tag: v1@${D1}\n+  tag: v1@${D2}`,
+      today: '2026-06-03',
+    });
+    check('21: an unresolved split-form ref is still gated (fail-closed)',
+      c.statuses.length === 1 && c.statuses[0].state === 'pending');
+    check('21: the unresolved ref is called out in the PR comment',
+      c.created.length === 1 && /split form/.test(c.created[0].body)
+        && c.created[0].body.includes(D2.slice(0, 19)));
+    check('21: the unresolved ref is surfaced as a warning',
+      c.warnings.some((w) => /split form/.test(w)));
   }
 
   // --- merge_group: PR head の判定をマージキューの一時 commit に転記する ---

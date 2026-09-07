@@ -84,7 +84,13 @@ jobs:
   test:
     needs: detect
     if: ${{ needs.detect.outputs.code == 'true' }}
-    uses: ./.github/workflows/_test.yml
+    # zizmor 1.30 の self-repository は `./` を `$/` にしろと言う。従わないのは、
+    # `$/` にすると actionlint が呼び出しを解決できなくなり、reusable workflow の
+    # input 検証（必須の欠落・存在しない input 名）がまるごと消えるから（実測）。
+    # audit の根拠である「前段ステップが clone したものを掴む」も、job レベルの
+    # 呼び出しには当たらない — GitHub が同じ commit から解決し FS を見ない。
+    # ignore は行単位。ステップの `uses: ./my-action` は今も検出される。
+    uses: ./.github/workflows/_test.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 

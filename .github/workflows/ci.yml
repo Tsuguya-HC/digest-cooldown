@@ -102,7 +102,7 @@ jobs:
   lint-workflows:
     needs: detect
     if: ${{ needs.detect.outputs.workflows == 'true' }}
-    uses: Tsuguya-HC/home-actions/.github/workflows/lint-workflows.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
+    uses: Tsuguya-HC/home-actions/.github/workflows/lint-workflows.yml@e104faf579d998450923e65f0d47a4ef790b8abd # v1.3.0
     permissions:
       contents: read
 
@@ -112,7 +112,7 @@ jobs:
   lint-renovate:
     needs: detect
     if: ${{ needs.detect.outputs.renovate == 'true' }}
-    uses: Tsuguya-HC/home-actions/.github/workflows/lint-renovate.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
+    uses: Tsuguya-HC/home-actions/.github/workflows/lint-renovate.yml@e104faf579d998450923e65f0d47a4ef790b8abd # v1.3.0
     permissions:
       contents: read
 
